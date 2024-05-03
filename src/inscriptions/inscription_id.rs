@@ -96,4 +96,98 @@ impl FromStr for InscriptionId {
     })
   }
 }
- 
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn display() {
+    assert_eq!(
+      inscription_id(1).to_string(),
+      "1111111111111111111111111111111111111111111111111111111111111111i1",
+    );
+    assert_eq!(
+      InscriptionId {
+        txid: txid(1),
+        index: 0,
+      }
+      .to_string(),
+      "1111111111111111111111111111111111111111111111111111111111111111i0",
+    );
+    assert_eq!(
+      InscriptionId {
+        txid: txid(1),
+        index: 0xFFFFFFFF,
+      }
+      .to_string(),
+      "1111111111111111111111111111111111111111111111111111111111111111i4294967295",
+    );
+  }
+
+  #[test]
+  fn from_str() {
+    assert_eq!(
+      "1111111111111111111111111111111111111111111111111111111111111111i1"
+        .parse::<InscriptionId>()
+        .unwrap(),
+      inscription_id(1),
+    );
+    assert_eq!(
+      "1111111111111111111111111111111111111111111111111111111111111111i4294967295"
+        .parse::<InscriptionId>()
+        .unwrap(),
+      InscriptionId {
+        txid: txid(1),
+        index: 0xFFFFFFFF,
+      },
+    );
+    assert_eq!(
+      "1111111111111111111111111111111111111111111111111111111111111111i4294967295"
+        .parse::<InscriptionId>()
+        .unwrap(),
+      InscriptionId {
+        txid: txid(1),
+        index: 0xFFFFFFFF,
+      },
+    );
+  }
+
+  #[test]
+  fn from_str_bad_character() {
+    assert_matches!(
+      "→".parse::<InscriptionId>(),
+      Err(ParseError::Character('→')),
+    );
+  }
+
+  #[test]
+  fn from_str_bad_length() {
+    assert_matches!("foo".parse::<InscriptionId>(), Err(ParseError::Length(3)));
+  }
+
+  #[test]
+  fn from_str_bad_separator() {
+    assert_matches!(
+      "0000000000000000000000000000000000000000000000000000000000000000x0".parse::<InscriptionId>(),
+      Err(ParseError::Separator('x')),
+    );
+  }
+
+  #[test]
+  fn from_str_bad_index() {
+    assert_matches!(
+      "0000000000000000000000000000000000000000000000000000000000000000ifoo"
+        .parse::<InscriptionId>(),
+      Err(ParseError::Index(_)),
+    );
+  }
+
+  #[test]
+  fn from_str_bad_txid() {
+    assert_matches!(
+      "x000000000000000000000000000000000000000000000000000000000000000i0".parse::<InscriptionId>(),
+      Err(ParseError::Txid(_)),
+    );
+  }
+}

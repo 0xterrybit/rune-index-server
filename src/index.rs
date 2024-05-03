@@ -45,6 +45,9 @@ mod reorg;
 mod rtx;
 mod updater;
 
+#[cfg(test)]
+pub(crate) mod testing;
+
 const SCHEMA_VERSION: u64 = 25;
 
 define_multimap_table! { SATPOINT_TO_SEQUENCE_NUMBER, &SatPointValue, u32 }
@@ -758,7 +761,30 @@ impl Index {
         != 0,
     )
   }
- 
+
+  #[cfg(test)]
+  pub(crate) fn statistic(&self, statistic: Statistic) -> u64 {
+    self
+      .database
+      .begin_read()
+      .unwrap()
+      .open_table(STATISTIC_TO_COUNT)
+      .unwrap()
+      .get(&statistic.key())
+      .unwrap()
+      .map(|x| x.value())
+      .unwrap_or_default()
+  }
+
+  #[cfg(test)]
+  pub(crate) fn inscription_number(&self, inscription_id: InscriptionId) -> i32 {
+    self
+      .get_inscription_entry(inscription_id)
+      .unwrap()
+      .unwrap()
+      .inscription_number
+  }
+
   pub(crate) fn block_count(&self) -> Result<u32> {
     self.begin_read()?.block_count()
   }
@@ -947,7 +973,7 @@ impl Index {
   pub(crate) fn get_rune_balances_for_outpoint(
     &self,
     outpoint: OutPoint,
-  ) -> Result<Vec<(SpacedRune, Pile)>> {
+  ) -> Result<BTreeMap<SpacedRune, Pile>> {
     let rtx = self.database.begin_read()?;
 
     let outpoint_to_balances = rtx.open_table(OUTPOINT_TO_RUNE_BALANCES)?;
@@ -955,12 +981,12 @@ impl Index {
     let id_to_rune_entries = rtx.open_table(RUNE_ID_TO_RUNE_ENTRY)?;
 
     let Some(balances) = outpoint_to_balances.get(&outpoint.store())? else {
-      return Ok(Vec::new());
+      return Ok(BTreeMap::new());
     };
 
     let balances_buffer = balances.value();
 
-    let mut balances = Vec::new();
+    let mut balances = BTreeMap::new();
     let mut i = 0;
     while i < balances_buffer.len() {
       let ((id, amount), length) = Index::decode_rune_balance(&balances_buffer[i..]).unwrap();
@@ -968,14 +994,14 @@ impl Index {
 
       let entry = RuneEntry::load(id_to_rune_entries.get(id.store())?.unwrap().value());
 
-      balances.push((
+      balances.insert(
         entry.spaced_rune,
         Pile {
           amount,
           divisibility: entry.divisibility,
           symbol: entry.symbol,
         },
-      ));
+      );
     }
 
     Ok(balances)
@@ -1126,7 +1152,70 @@ impl Index {
 
     Ok((collections, more))
   }
- 
+
+  #[cfg(test)]
+  pub(crate) fn get_children_by_inscription_id(
+    &self,
+    inscription_id: InscriptionId,
+  ) -> Result<Vec<InscriptionId>> {
+    let rtx = self.database.begin_read()?;
+
+    let Some(sequence_number) = rtx
+      .open_table(INSCRIPTION_ID_TO_SEQUENCE_NUMBER)?
+      .get(&inscription_id.store())?
+      .map(|sequence_number| sequence_number.value())
+    else {
+      return Ok(Vec::new());
+    };
+
+    self
+      .get_children_by_sequence_number_paginated(sequence_number, usize::MAX, 0)
+      .map(|(children, _more)| children)
+  }
+
+  #[cfg(test)]
+  pub(crate) fn get_parents_by_inscription_id(
+    &self,
+    inscription_id: InscriptionId,
+  ) -> Vec<InscriptionId> {
+    let rtx = self.database.begin_read().unwrap();
+
+    let sequence_number = rtx
+      .open_table(INSCRIPTION_ID_TO_SEQUENCE_NUMBER)
+      .unwrap()
+      .get(&inscription_id.store())
+      .unwrap()
+      .unwrap()
+      .value();
+
+    let sequence_number_to_inscription_entry = rtx
+      .open_table(SEQUENCE_NUMBER_TO_INSCRIPTION_ENTRY)
+      .unwrap();
+
+    let parent_sequences = InscriptionEntry::load(
+      sequence_number_to_inscription_entry
+        .get(sequence_number)
+        .unwrap()
+        .unwrap()
+        .value(),
+    )
+    .parents;
+
+    parent_sequences
+      .into_iter()
+      .map(|parent_sequence_number| {
+        InscriptionEntry::load(
+          sequence_number_to_inscription_entry
+            .get(parent_sequence_number)
+            .unwrap()
+            .unwrap()
+            .value(),
+        )
+        .id
+      })
+      .collect()
+  }
+
   pub(crate) fn get_children_by_sequence_number_paginated(
     &self,
     sequence_number: u32,
@@ -1305,7 +1394,29 @@ impl Index {
     .transpose()
   }
 
- 
+  #[cfg(test)]
+  pub(crate) fn get_inscription_id_by_inscription_number(
+    &self,
+    inscription_number: i32,
+  ) -> Result<Option<InscriptionId>> {
+    let rtx = self.database.begin_read()?;
+
+    let Some(sequence_number) = rtx
+      .open_table(INSCRIPTION_NUMBER_TO_SEQUENCE_NUMBER)?
+      .get(inscription_number)?
+      .map(|guard| guard.value())
+    else {
+      return Ok(None);
+    };
+
+    let inscription_id = rtx
+      .open_table(SEQUENCE_NUMBER_TO_INSCRIPTION_ENTRY)?
+      .get(&sequence_number)?
+      .map(|entry| InscriptionEntry::load(entry.value()).id);
+
+    Ok(inscription_id)
+  }
+
   pub(crate) fn get_inscription_satpoint_by_id(
     &self,
     inscription_id: InscriptionId,
@@ -1949,7 +2060,88 @@ impl Index {
     Ok(entry)
   }
 
- 
+  #[cfg(test)]
+  fn assert_inscription_location(
+    &self,
+    inscription_id: InscriptionId,
+    satpoint: SatPoint,
+    sat: Option<u64>,
+  ) {
+    let rtx = self.database.begin_read().unwrap();
+
+    let satpoint_to_sequence_number = rtx
+      .open_multimap_table(SATPOINT_TO_SEQUENCE_NUMBER)
+      .unwrap();
+
+    let sequence_number_to_satpoint = rtx.open_table(SEQUENCE_NUMBER_TO_SATPOINT).unwrap();
+
+    let sequence_number = rtx
+      .open_table(INSCRIPTION_ID_TO_SEQUENCE_NUMBER)
+      .unwrap()
+      .get(&inscription_id.store())
+      .unwrap()
+      .unwrap()
+      .value();
+
+    assert_eq!(
+      satpoint_to_sequence_number.len().unwrap(),
+      sequence_number_to_satpoint.len().unwrap(),
+    );
+
+    assert_eq!(
+      SatPoint::load(
+        *sequence_number_to_satpoint
+          .get(sequence_number)
+          .unwrap()
+          .unwrap()
+          .value()
+      ),
+      satpoint,
+    );
+
+    assert!(satpoint_to_sequence_number
+      .get(&satpoint.store())
+      .unwrap()
+      .any(|result| result.unwrap().value() == sequence_number));
+
+    match sat {
+      Some(sat) => {
+        if self.index_sats {
+          // unbound inscriptions should not be assigned to a sat
+          assert_ne!(satpoint.outpoint, unbound_outpoint());
+
+          assert!(rtx
+            .open_multimap_table(SAT_TO_SEQUENCE_NUMBER)
+            .unwrap()
+            .get(&sat)
+            .unwrap()
+            .any(|entry| entry.unwrap().value() == sequence_number));
+
+          // we do not track common sats (only the sat ranges)
+          if !Sat(sat).common() {
+            assert_eq!(
+              SatPoint::load(
+                *rtx
+                  .open_table(SAT_TO_SATPOINT)
+                  .unwrap()
+                  .get(&sat)
+                  .unwrap()
+                  .unwrap()
+                  .value()
+              ),
+              satpoint,
+            );
+          }
+        }
+      }
+      None => {
+        if self.index_sats {
+          assert_eq!(satpoint.outpoint, unbound_outpoint())
+        }
+      }
+    }
+  }
+
   fn inscriptions_on_output<'a: 'tx, 'tx>(
     satpoint_to_sequence_number: &'a impl ReadableMultimapTable<&'static SatPointValue, u32>,
     sequence_number_to_inscription_entry: &'a impl ReadableTable<u32, InscriptionEntryValue>,
@@ -2047,5 +2239,4372 @@ impl Index {
       ),
       txout,
     )))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use {super::*, crate::index::testing::Context};
+
+  #[test]
+  fn height_limit() {
+    {
+      let context = Context::builder().args(["--height-limit", "0"]).build();
+      context.mine_blocks(1);
+      assert_eq!(context.index.block_height().unwrap(), None);
+      assert_eq!(context.index.block_count().unwrap(), 0);
+    }
+
+    {
+      let context = Context::builder().args(["--height-limit", "1"]).build();
+      context.mine_blocks(1);
+      assert_eq!(context.index.block_height().unwrap(), Some(Height(0)));
+      assert_eq!(context.index.block_count().unwrap(), 1);
+    }
+
+    {
+      let context = Context::builder().args(["--height-limit", "2"]).build();
+      context.mine_blocks(2);
+      assert_eq!(context.index.block_height().unwrap(), Some(Height(1)));
+      assert_eq!(context.index.block_count().unwrap(), 2);
+    }
+  }
+
+  #[test]
+  fn inscriptions_below_first_inscription_height_are_skipped() {
+    let inscription = inscription("text/plain;charset=utf-8", "hello");
+    let template = TransactionTemplate {
+      inputs: &[(1, 0, 0, inscription.to_witness())],
+      ..default()
+    };
+
+    {
+      let context = Context::builder().build();
+      context.mine_blocks(1);
+      let txid = context.core.broadcast_tx(template.clone());
+      let inscription_id = InscriptionId { txid, index: 0 };
+      context.mine_blocks(1);
+
+      assert_eq!(
+        context.index.get_inscription_by_id(inscription_id).unwrap(),
+        Some(inscription)
+      );
+
+      assert_eq!(
+        context
+          .index
+          .get_inscription_satpoint_by_id(inscription_id)
+          .unwrap(),
+        Some(SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        })
+      );
+    }
+
+    {
+      let context = Context::builder()
+        .arg("--first-inscription-height=3")
+        .build();
+      context.mine_blocks(1);
+      let txid = context.core.broadcast_tx(template);
+      let inscription_id = InscriptionId { txid, index: 0 };
+      context.mine_blocks(1);
+
+      assert_eq!(
+        context
+          .index
+          .get_inscription_satpoint_by_id(inscription_id)
+          .unwrap(),
+        None,
+      );
+    }
+  }
+
+  #[test]
+  fn inscriptions_are_not_indexed_if_no_index_inscriptions_flag_is_set() {
+    let inscription = inscription("text/plain;charset=utf-8", "hello");
+    let template = TransactionTemplate {
+      inputs: &[(1, 0, 0, inscription.to_witness())],
+      ..default()
+    };
+
+    {
+      let context = Context::builder().build();
+      context.mine_blocks(1);
+      let txid = context.core.broadcast_tx(template.clone());
+      let inscription_id = InscriptionId { txid, index: 0 };
+      context.mine_blocks(1);
+
+      assert_eq!(
+        context.index.get_inscription_by_id(inscription_id).unwrap(),
+        Some(inscription)
+      );
+
+      assert_eq!(
+        context
+          .index
+          .get_inscription_satpoint_by_id(inscription_id)
+          .unwrap(),
+        Some(SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        })
+      );
+    }
+
+    {
+      let context = Context::builder().arg("--no-index-inscriptions").build();
+      context.mine_blocks(1);
+      let txid = context.core.broadcast_tx(template);
+      let inscription_id = InscriptionId { txid, index: 0 };
+      context.mine_blocks(1);
+
+      assert_eq!(
+        context
+          .index
+          .get_inscription_satpoint_by_id(inscription_id)
+          .unwrap(),
+        None,
+      );
+    }
+  }
+
+  #[test]
+  fn list_first_coinbase_transaction() {
+    let context = Context::builder().arg("--index-sats").build();
+    assert_eq!(
+      context
+        .index
+        .list(
+          "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b:0"
+            .parse()
+            .unwrap()
+        )
+        .unwrap()
+        .unwrap(),
+      &[(0, 50 * COIN_VALUE)],
+    )
+  }
+
+  #[test]
+  fn list_second_coinbase_transaction() {
+    let context = Context::builder().arg("--index-sats").build();
+    let txid = context.mine_blocks(1)[0].txdata[0].txid();
+    assert_eq!(
+      context.index.list(OutPoint::new(txid, 0)).unwrap().unwrap(),
+      &[(50 * COIN_VALUE, 100 * COIN_VALUE)],
+    )
+  }
+
+  #[test]
+  fn list_split_ranges_are_tracked_correctly() {
+    let context = Context::builder().arg("--index-sats").build();
+
+    context.mine_blocks(1);
+    let split_coinbase_output = TransactionTemplate {
+      inputs: &[(1, 0, 0, Default::default())],
+      outputs: 2,
+      fee: 0,
+      ..default()
+    };
+    let txid = context.core.broadcast_tx(split_coinbase_output);
+
+    context.mine_blocks(1);
+
+    assert_eq!(
+      context.index.list(OutPoint::new(txid, 0)).unwrap().unwrap(),
+      &[(50 * COIN_VALUE, 75 * COIN_VALUE)],
+    );
+
+    assert_eq!(
+      context.index.list(OutPoint::new(txid, 1)).unwrap().unwrap(),
+      &[(75 * COIN_VALUE, 100 * COIN_VALUE)],
+    );
+  }
+
+  #[test]
+  fn list_merge_ranges_are_tracked_correctly() {
+    let context = Context::builder().arg("--index-sats").build();
+
+    context.mine_blocks(2);
+    let merge_coinbase_outputs = TransactionTemplate {
+      inputs: &[(1, 0, 0, Default::default()), (2, 0, 0, Default::default())],
+      fee: 0,
+      ..default()
+    };
+
+    let txid = context.core.broadcast_tx(merge_coinbase_outputs);
+    context.mine_blocks(1);
+
+    assert_eq!(
+      context.index.list(OutPoint::new(txid, 0)).unwrap().unwrap(),
+      &[
+        (50 * COIN_VALUE, 100 * COIN_VALUE),
+        (100 * COIN_VALUE, 150 * COIN_VALUE)
+      ],
+    );
+  }
+
+  #[test]
+  fn list_fee_paying_transaction_range() {
+    let context = Context::builder().arg("--index-sats").build();
+
+    context.mine_blocks(1);
+    let fee_paying_tx = TransactionTemplate {
+      inputs: &[(1, 0, 0, Default::default())],
+      outputs: 2,
+      fee: 10,
+      ..default()
+    };
+    let txid = context.core.broadcast_tx(fee_paying_tx);
+    let coinbase_txid = context.mine_blocks(1)[0].txdata[0].txid();
+
+    assert_eq!(
+      context.index.list(OutPoint::new(txid, 0)).unwrap().unwrap(),
+      &[(50 * COIN_VALUE, 7499999995)],
+    );
+
+    assert_eq!(
+      context.index.list(OutPoint::new(txid, 1)).unwrap().unwrap(),
+      &[(7499999995, 9999999990)],
+    );
+
+    assert_eq!(
+      context
+        .index
+        .list(OutPoint::new(coinbase_txid, 0))
+        .unwrap()
+        .unwrap(),
+      &[(10000000000, 15000000000), (9999999990, 10000000000)],
+    );
+  }
+
+  #[test]
+  fn list_two_fee_paying_transaction_range() {
+    let context = Context::builder().arg("--index-sats").build();
+
+    context.mine_blocks(2);
+    let first_fee_paying_tx = TransactionTemplate {
+      inputs: &[(1, 0, 0, Default::default())],
+      fee: 10,
+      ..default()
+    };
+    let second_fee_paying_tx = TransactionTemplate {
+      inputs: &[(2, 0, 0, Default::default())],
+      fee: 10,
+      ..default()
+    };
+    context.core.broadcast_tx(first_fee_paying_tx);
+    context.core.broadcast_tx(second_fee_paying_tx);
+
+    let coinbase_txid = context.mine_blocks(1)[0].txdata[0].txid();
+
+    assert_eq!(
+      context
+        .index
+        .list(OutPoint::new(coinbase_txid, 0))
+        .unwrap()
+        .unwrap(),
+      &[
+        (15000000000, 20000000000),
+        (9999999990, 10000000000),
+        (14999999990, 15000000000)
+      ],
+    );
+  }
+
+  #[test]
+  fn list_null_output() {
+    let context = Context::builder().arg("--index-sats").build();
+
+    context.mine_blocks(1);
+    let no_value_output = TransactionTemplate {
+      inputs: &[(1, 0, 0, Default::default())],
+      fee: 50 * COIN_VALUE,
+      ..default()
+    };
+    let txid = context.core.broadcast_tx(no_value_output);
+    context.mine_blocks(1);
+
+    assert_eq!(
+      context.index.list(OutPoint::new(txid, 0)).unwrap().unwrap(),
+      &[],
+    );
+  }
+
+  #[test]
+  fn list_null_input() {
+    let context = Context::builder().arg("--index-sats").build();
+
+    context.mine_blocks(1);
+    let no_value_output = TransactionTemplate {
+      inputs: &[(1, 0, 0, Default::default())],
+      fee: 50 * COIN_VALUE,
+      ..default()
+    };
+    context.core.broadcast_tx(no_value_output);
+    context.mine_blocks(1);
+
+    let no_value_input = TransactionTemplate {
+      inputs: &[(2, 1, 0, Default::default())],
+      fee: 0,
+      ..default()
+    };
+    let txid = context.core.broadcast_tx(no_value_input);
+    context.mine_blocks(1);
+
+    assert_eq!(
+      context.index.list(OutPoint::new(txid, 0)).unwrap().unwrap(),
+      &[],
+    );
+  }
+
+  #[test]
+  fn list_spent_output() {
+    let context = Context::builder().arg("--index-sats").build();
+    context.mine_blocks(1);
+    context.core.broadcast_tx(TransactionTemplate {
+      inputs: &[(1, 0, 0, Default::default())],
+      fee: 0,
+      ..default()
+    });
+    context.mine_blocks(1);
+    let txid = context.core.tx(1, 0).txid();
+    assert_matches!(context.index.list(OutPoint::new(txid, 0)).unwrap(), None);
+  }
+
+  #[test]
+  fn list_unknown_output() {
+    let context = Context::builder().arg("--index-sats").build();
+
+    assert_eq!(
+      context
+        .index
+        .list(
+          "0000000000000000000000000000000000000000000000000000000000000000:0"
+            .parse()
+            .unwrap()
+        )
+        .unwrap(),
+      None
+    );
+  }
+
+  #[test]
+  fn find_first_sat() {
+    let context = Context::builder().arg("--index-sats").build();
+    assert_eq!(
+      context.index.find(Sat(0)).unwrap().unwrap(),
+      SatPoint {
+        outpoint: "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b:0"
+          .parse()
+          .unwrap(),
+        offset: 0,
+      }
+    )
+  }
+
+  #[test]
+  fn find_second_sat() {
+    let context = Context::builder().arg("--index-sats").build();
+    assert_eq!(
+      context.index.find(Sat(1)).unwrap().unwrap(),
+      SatPoint {
+        outpoint: "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b:0"
+          .parse()
+          .unwrap(),
+        offset: 1,
+      }
+    )
+  }
+
+  #[test]
+  fn find_first_sat_of_second_block() {
+    let context = Context::builder().arg("--index-sats").build();
+    context.mine_blocks(1);
+    let tx = context.core.tx(1, 0);
+    assert_eq!(
+      context.index.find(Sat(50 * COIN_VALUE)).unwrap().unwrap(),
+      SatPoint {
+        outpoint: OutPoint {
+          txid: tx.txid(),
+          vout: 0,
+        },
+        offset: 0,
+      }
+    )
+  }
+
+  #[test]
+  fn find_unmined_sat() {
+    let context = Context::builder().arg("--index-sats").build();
+    assert_eq!(context.index.find(Sat(50 * COIN_VALUE)).unwrap(), None);
+  }
+
+  #[test]
+  fn find_first_sat_spent_in_second_block() {
+    let context = Context::builder().arg("--index-sats").build();
+    context.mine_blocks(1);
+    let spend_txid = context.core.broadcast_tx(TransactionTemplate {
+      inputs: &[(1, 0, 0, Default::default())],
+      fee: 0,
+      ..default()
+    });
+    context.mine_blocks(1);
+    assert_eq!(
+      context.index.find(Sat(50 * COIN_VALUE)).unwrap().unwrap(),
+      SatPoint {
+        outpoint: OutPoint::new(spend_txid, 0),
+        offset: 0,
+      }
+    )
+  }
+
+  #[test]
+  fn inscriptions_are_tracked_correctly() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+    }
+  }
+
+  #[test]
+  fn inscriptions_without_sats_are_unbound() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, Default::default())],
+        fee: 50 * 100_000_000,
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(2, 1, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: unbound_outpoint(),
+          offset: 0,
+        },
+        None,
+      );
+
+      context.mine_blocks(1);
+
+      context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(4, 0, 0, Default::default())],
+        fee: 50 * 100_000_000,
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(5, 1, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: unbound_outpoint(),
+          offset: 1,
+        },
+        None,
+      );
+    }
+  }
+
+  #[test]
+  fn unaligned_inscriptions_are_tracked_correctly() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+
+      let send_txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(2, 0, 0, Default::default()), (2, 1, 0, Default::default())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint {
+            txid: send_txid,
+            vout: 0,
+          },
+          offset: 50 * COIN_VALUE,
+        },
+        Some(50 * COIN_VALUE),
+      );
+    }
+  }
+
+  #[test]
+  fn merged_inscriptions_are_tracked_correctly() {
+    for context in Context::configurations() {
+      context.mine_blocks(2);
+
+      let first_txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+
+      let first_inscription_id = InscriptionId {
+        txid: first_txid,
+        index: 0,
+      };
+
+      let second_txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(2, 0, 0, inscription("text/png", [1; 100]).to_witness())],
+        ..default()
+      });
+      let second_inscription_id = InscriptionId {
+        txid: second_txid,
+        index: 0,
+      };
+
+      context.mine_blocks(1);
+
+      let merged_txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(3, 1, 0, Default::default()), (3, 2, 0, Default::default())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        first_inscription_id,
+        SatPoint {
+          outpoint: OutPoint {
+            txid: merged_txid,
+            vout: 0,
+          },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+
+      context.index.assert_inscription_location(
+        second_inscription_id,
+        SatPoint {
+          outpoint: OutPoint {
+            txid: merged_txid,
+            vout: 0,
+          },
+          offset: 50 * COIN_VALUE,
+        },
+        Some(100 * COIN_VALUE),
+      );
+    }
+  }
+
+  #[test]
+  fn inscriptions_that_are_sent_to_second_output_are_are_tracked_correctly() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+
+      let send_txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(2, 0, 0, Default::default()), (2, 1, 0, Default::default())],
+        outputs: 2,
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint {
+            txid: send_txid,
+            vout: 1,
+          },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+    }
+  }
+
+  #[test]
+  fn missing_inputs_are_fetched_from_bitcoin_core() {
+    for args in [
+      ["--first-inscription-height", "2"].as_slice(),
+      ["--first-inscription-height", "2", "--index-sats"].as_slice(),
+    ] {
+      let context = Context::builder().args(args).build();
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+
+      let send_txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(2, 0, 0, Default::default()), (2, 1, 0, Default::default())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint {
+            txid: send_txid,
+            vout: 0,
+          },
+          offset: 50 * COIN_VALUE,
+        },
+        Some(50 * COIN_VALUE),
+      );
+    }
+  }
+
+  #[test]
+  fn one_input_fee_spent_inscriptions_are_tracked_correctly() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(2, 1, 0, Default::default())],
+        fee: 50 * COIN_VALUE,
+        ..default()
+      });
+
+      let coinbase_tx = context.mine_blocks(1)[0].txdata[0].txid();
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint {
+            txid: coinbase_tx,
+            vout: 0,
+          },
+          offset: 50 * COIN_VALUE,
+        },
+        Some(50 * COIN_VALUE),
+      );
+    }
+  }
+
+  #[test]
+  fn two_input_fee_spent_inscriptions_are_tracked_correctly() {
+    for context in Context::configurations() {
+      context.mine_blocks(2);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(2, 0, 0, Default::default()), (3, 1, 0, Default::default())],
+        fee: 50 * COIN_VALUE,
+        ..default()
+      });
+
+      let coinbase_tx = context.mine_blocks(1)[0].txdata[0].txid();
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint {
+            txid: coinbase_tx,
+            vout: 0,
+          },
+          offset: 50 * COIN_VALUE,
+        },
+        Some(50 * COIN_VALUE),
+      );
+    }
+  }
+
+  #[test]
+  fn inscription_can_be_fee_spent_in_first_transaction() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        fee: 50 * COIN_VALUE,
+        ..default()
+      });
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      let coinbase_tx = context.mine_blocks(1)[0].txdata[0].txid();
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint {
+            txid: coinbase_tx,
+            vout: 0,
+          },
+          offset: 50 * COIN_VALUE,
+        },
+        Some(50 * COIN_VALUE),
+      );
+    }
+  }
+
+  #[test]
+  fn lost_inscriptions() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        fee: 50 * COIN_VALUE,
+        ..default()
+      });
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks_with_subsidy(1, 0);
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint::null(),
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+    }
+  }
+
+  #[test]
+  fn multiple_inscriptions_can_be_lost() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let first_txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        fee: 50 * COIN_VALUE,
+        ..default()
+      });
+      let first_inscription_id = InscriptionId {
+        txid: first_txid,
+        index: 0,
+      };
+
+      context.mine_blocks_with_subsidy(1, 0);
+      context.mine_blocks(1);
+
+      let second_txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(3, 0, 0, inscription("text/plain", "hello").to_witness())],
+        fee: 50 * COIN_VALUE,
+        ..default()
+      });
+      let second_inscription_id = InscriptionId {
+        txid: second_txid,
+        index: 0,
+      };
+
+      context.mine_blocks_with_subsidy(1, 0);
+
+      context.index.assert_inscription_location(
+        first_inscription_id,
+        SatPoint {
+          outpoint: OutPoint::null(),
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+
+      context.index.assert_inscription_location(
+        second_inscription_id,
+        SatPoint {
+          outpoint: OutPoint::null(),
+          offset: 50 * COIN_VALUE,
+        },
+        Some(150 * COIN_VALUE),
+      );
+    }
+  }
+
+  #[test]
+  fn lost_sats_are_tracked_correctly() {
+    let context = Context::builder()
+      .args(["--index-sats", "--first-inscription-height", "10"])
+      .build();
+    assert_eq!(context.index.statistic(Statistic::LostSats), 0);
+
+    context.mine_blocks(1);
+    assert_eq!(context.index.statistic(Statistic::LostSats), 0);
+
+    context.mine_blocks_with_subsidy(1, 0);
+    assert_eq!(
+      context.index.statistic(Statistic::LostSats),
+      50 * COIN_VALUE
+    );
+
+    context.mine_blocks_with_subsidy(1, 0);
+    assert_eq!(
+      context.index.statistic(Statistic::LostSats),
+      100 * COIN_VALUE
+    );
+
+    context.mine_blocks(1);
+    assert_eq!(
+      context.index.statistic(Statistic::LostSats),
+      100 * COIN_VALUE
+    );
+  }
+
+  #[test]
+  fn lost_sat_ranges_are_tracked_correctly() {
+    let context = Context::builder()
+      .args(["--index-sats", "--first-inscription-height", "10"])
+      .build();
+
+    let null_ranges = || context.index.list(OutPoint::null()).unwrap().unwrap();
+
+    assert!(null_ranges().is_empty());
+
+    context.mine_blocks(1);
+
+    assert!(null_ranges().is_empty());
+
+    context.mine_blocks_with_subsidy(1, 0);
+
+    assert_eq!(null_ranges(), [(100 * COIN_VALUE, 150 * COIN_VALUE)]);
+
+    context.mine_blocks_with_subsidy(1, 0);
+
+    assert_eq!(
+      null_ranges(),
+      [
+        (100 * COIN_VALUE, 150 * COIN_VALUE),
+        (150 * COIN_VALUE, 200 * COIN_VALUE)
+      ]
+    );
+
+    context.mine_blocks(1);
+
+    assert_eq!(
+      null_ranges(),
+      [
+        (100 * COIN_VALUE, 150 * COIN_VALUE),
+        (150 * COIN_VALUE, 200 * COIN_VALUE)
+      ]
+    );
+
+    context.mine_blocks_with_subsidy(1, 0);
+
+    assert_eq!(
+      null_ranges(),
+      [
+        (100 * COIN_VALUE, 150 * COIN_VALUE),
+        (150 * COIN_VALUE, 200 * COIN_VALUE),
+        (250 * COIN_VALUE, 300 * COIN_VALUE)
+      ]
+    );
+  }
+
+  #[test]
+  fn lost_inscriptions_get_lost_satpoints() {
+    for context in Context::configurations() {
+      context.mine_blocks_with_subsidy(1, 0);
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(2, 0, 0, inscription("text/plain", "hello").to_witness())],
+        outputs: 2,
+        ..default()
+      });
+      let inscription_id = InscriptionId { txid, index: 0 };
+      context.mine_blocks(1);
+
+      context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(3, 1, 1, Default::default()), (3, 1, 0, Default::default())],
+        fee: 50 * COIN_VALUE,
+        ..default()
+      });
+      context.mine_blocks_with_subsidy(1, 0);
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint::null(),
+          offset: 75 * COIN_VALUE,
+        },
+        Some(100 * COIN_VALUE),
+      );
+    }
+  }
+
+  #[test]
+  fn inscription_skips_zero_value_first_output_of_inscribe_transaction() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        outputs: 2,
+        output_values: &[0, 50 * COIN_VALUE],
+        ..default()
+      });
+      let inscription_id = InscriptionId { txid, index: 0 };
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 1 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+    }
+  }
+
+  #[test]
+  fn inscription_can_be_lost_in_first_transaction() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        fee: 50 * COIN_VALUE,
+        ..default()
+      });
+      let inscription_id = InscriptionId { txid, index: 0 };
+      context.mine_blocks_with_subsidy(1, 0);
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint::null(),
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+    }
+  }
+
+  #[test]
+  fn lost_rare_sats_are_tracked() {
+    let context = Context::builder().arg("--index-sats").build();
+    context.mine_blocks_with_subsidy(1, 0);
+    context.mine_blocks_with_subsidy(1, 0);
+
+    assert_eq!(
+      context
+        .index
+        .rare_sat_satpoint(Sat(50 * COIN_VALUE))
+        .unwrap()
+        .unwrap(),
+      SatPoint {
+        outpoint: OutPoint::null(),
+        offset: 0,
+      },
+    );
+
+    assert_eq!(
+      context
+        .index
+        .rare_sat_satpoint(Sat(100 * COIN_VALUE))
+        .unwrap()
+        .unwrap(),
+      SatPoint {
+        outpoint: OutPoint::null(),
+        offset: 50 * COIN_VALUE,
+      },
+    );
+  }
+
+  #[test]
+  fn old_schema_gives_correct_error() {
+    let tempdir = {
+      let context = Context::builder().build();
+
+      let wtx = context.index.database.begin_write().unwrap();
+
+      wtx
+        .open_table(STATISTIC_TO_COUNT)
+        .unwrap()
+        .insert(&Statistic::Schema.key(), &0)
+        .unwrap();
+
+      wtx.commit().unwrap();
+
+      context.tempdir
+    };
+
+    let path = tempdir.path().to_owned();
+
+    let delimiter = if cfg!(windows) { '\\' } else { '/' };
+
+    assert_eq!(
+      Context::builder().tempdir(tempdir).try_build().err().unwrap().to_string(),
+      format!("index at `{}{delimiter}regtest{delimiter}index.redb` appears to have been built with an older, incompatible version of ord, consider deleting and rebuilding the index: index schema 0, ord schema {SCHEMA_VERSION}", path.display()));
+  }
+
+  #[test]
+  fn new_schema_gives_correct_error() {
+    let tempdir = {
+      let context = Context::builder().build();
+
+      let wtx = context.index.database.begin_write().unwrap();
+
+      wtx
+        .open_table(STATISTIC_TO_COUNT)
+        .unwrap()
+        .insert(&Statistic::Schema.key(), &u64::MAX)
+        .unwrap();
+
+      wtx.commit().unwrap();
+
+      context.tempdir
+    };
+
+    let path = tempdir.path().to_owned();
+
+    let delimiter = if cfg!(windows) { '\\' } else { '/' };
+
+    assert_eq!(
+      Context::builder().tempdir(tempdir).try_build().err().unwrap().to_string(),
+      format!("index at `{}{delimiter}regtest{delimiter}index.redb` appears to have been built with a newer, incompatible version of ord, consider updating ord: index schema {}, ord schema {SCHEMA_VERSION}", path.display(), u64::MAX));
+  }
+
+  #[test]
+  fn inscriptions_on_output() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      assert_eq!(
+        context
+          .index
+          .get_inscriptions_on_output(OutPoint { txid, vout: 0 })
+          .unwrap(),
+        []
+      );
+
+      context.mine_blocks(1);
+
+      assert_eq!(
+        context
+          .index
+          .get_inscriptions_on_output(OutPoint { txid, vout: 0 })
+          .unwrap(),
+        [inscription_id]
+      );
+
+      let send_id = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(2, 1, 0, Default::default())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      assert_eq!(
+        context
+          .index
+          .get_inscriptions_on_output(OutPoint { txid, vout: 0 })
+          .unwrap(),
+        []
+      );
+
+      assert_eq!(
+        context
+          .index
+          .get_inscriptions_on_output(OutPoint {
+            txid: send_id,
+            vout: 0,
+          })
+          .unwrap(),
+        [inscription_id]
+      );
+    }
+  }
+
+  #[test]
+  fn inscriptions_on_same_sat_after_the_first_are_not_unbound() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let first = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId {
+        txid: first,
+        index: 0,
+      };
+
+      assert_eq!(
+        context
+          .index
+          .get_inscriptions_on_output(OutPoint {
+            txid: first,
+            vout: 0
+          })
+          .unwrap(),
+        [inscription_id]
+      );
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint {
+            txid: first,
+            vout: 0,
+          },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+
+      let second = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(2, 1, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+
+      let inscription_id = InscriptionId {
+        txid: second,
+        index: 0,
+      };
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint {
+            txid: second,
+            vout: 0,
+          },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+
+      assert!(context
+        .index
+        .get_inscription_by_id(InscriptionId {
+          txid: second,
+          index: 0
+        })
+        .unwrap()
+        .is_some());
+
+      assert!(context
+        .index
+        .get_inscription_by_id(InscriptionId {
+          txid: second,
+          index: 0
+        })
+        .unwrap()
+        .is_some());
+    }
+  }
+
+  #[test]
+  fn get_latest_inscriptions_with_no_more() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      let (inscriptions, more) = context.index.get_inscriptions_paginated(100, 0).unwrap();
+      assert_eq!(inscriptions, &[inscription_id]);
+      assert!(!more);
+    }
+  }
+
+  #[test]
+  fn get_latest_inscriptions_with_more() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let mut ids = Vec::new();
+
+      for i in 0..101 {
+        let txid = context.core.broadcast_tx(TransactionTemplate {
+          inputs: &[(i + 1, 0, 0, inscription("text/plain", "hello").to_witness())],
+          ..default()
+        });
+        context.mine_blocks(1);
+        ids.push(InscriptionId { txid, index: 0 });
+      }
+
+      ids.reverse();
+      ids.pop();
+
+      assert_eq!(ids.len(), 100);
+
+      let (inscriptions, more) = context.index.get_inscriptions_paginated(100, 0).unwrap();
+      assert_eq!(inscriptions, ids);
+      assert!(more);
+    }
+  }
+
+  #[test]
+  fn unrecognized_even_field_inscriptions_are_cursed_and_unbound() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let witness = envelope(&[
+        b"ord",
+        &[1],
+        b"text/plain;charset=utf-8",
+        &[2],
+        b"bar",
+        &[4],
+        b"ord",
+      ]);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, witness)],
+        ..default()
+      });
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: unbound_outpoint(),
+          offset: 0,
+        },
+        None,
+      );
+
+      assert_eq!(context.index.inscription_number(inscription_id), -1);
+    }
+  }
+
+  #[test]
+  fn unrecognized_even_field_inscriptions_are_unbound_after_jubilee() {
+    for context in Context::configurations() {
+      context.mine_blocks(109);
+
+      let witness = envelope(&[
+        b"ord",
+        &[1],
+        b"text/plain;charset=utf-8",
+        &[2],
+        b"bar",
+        &[4],
+        b"ord",
+      ]);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, witness)],
+        ..default()
+      });
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: unbound_outpoint(),
+          offset: 0,
+        },
+        None,
+      );
+
+      assert_eq!(context.index.inscription_number(inscription_id), 0);
+    }
+  }
+
+  #[test]
+  fn inscriptions_are_uncursed_after_jubilee() {
+    for context in Context::configurations() {
+      context.mine_blocks(108);
+
+      let witness = envelope(&[
+        b"ord",
+        &[1],
+        b"text/plain;charset=utf-8",
+        &[1],
+        b"text/plain;charset=utf-8",
+      ]);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, witness.clone())],
+        ..default()
+      });
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      assert_eq!(context.core.height(), 109);
+
+      assert_eq!(context.index.inscription_number(inscription_id), -1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(2, 0, 0, witness)],
+        ..default()
+      });
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      assert_eq!(context.core.height(), 110);
+
+      assert_eq!(context.index.inscription_number(inscription_id), 0);
+    }
+  }
+
+  #[test]
+  fn duplicate_field_inscriptions_are_cursed() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let witness = envelope(&[
+        b"ord",
+        &[1],
+        b"text/plain;charset=utf-8",
+        &[1],
+        b"text/plain;charset=utf-8",
+      ]);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, witness)],
+        ..default()
+      });
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      assert_eq!(context.index.inscription_number(inscription_id), -1);
+    }
+  }
+
+  #[test]
+  fn incomplete_field_inscriptions_are_cursed() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let witness = envelope(&[b"ord", &[1]]);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, witness)],
+        ..default()
+      });
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      assert_eq!(context.index.inscription_number(inscription_id), -1);
+    }
+  }
+
+  #[test]
+  fn inscriptions_with_pushnum_opcodes_are_cursed() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let script = script::Builder::new()
+        .push_opcode(opcodes::OP_FALSE)
+        .push_opcode(opcodes::all::OP_IF)
+        .push_slice(b"ord")
+        .push_slice([])
+        .push_opcode(opcodes::all::OP_PUSHNUM_1)
+        .push_opcode(opcodes::all::OP_ENDIF)
+        .into_script();
+
+      let witness = Witness::from_slice(&[script.into_bytes(), Vec::new()]);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, witness)],
+        ..default()
+      });
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      assert_eq!(context.index.inscription_number(inscription_id), -1);
+    }
+  }
+
+  #[test]
+  fn inscriptions_with_stutter_are_cursed() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let script = script::Builder::new()
+        .push_opcode(opcodes::OP_FALSE)
+        .push_opcode(opcodes::OP_FALSE)
+        .push_opcode(opcodes::all::OP_IF)
+        .push_slice(b"ord")
+        .push_slice([])
+        .push_opcode(opcodes::all::OP_PUSHNUM_1)
+        .push_opcode(opcodes::all::OP_ENDIF)
+        .into_script();
+
+      let witness = Witness::from_slice(&[script.into_bytes(), Vec::new()]);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, witness)],
+        ..default()
+      });
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      assert_eq!(context.index.inscription_number(inscription_id), -1);
+    }
+  }
+
+  // https://github.com/ordinals/ord/issues/2062
+  #[test]
+  fn zero_value_transaction_inscription_not_cursed_but_unbound() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, Default::default())],
+        fee: 50 * 100_000_000,
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(2, 1, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: unbound_outpoint(),
+          offset: 0,
+        },
+        None,
+      );
+
+      assert_eq!(context.index.inscription_number(inscription_id), 0);
+    }
+  }
+
+  #[test]
+  fn transaction_with_inscription_inside_zero_value_2nd_input_should_be_unbound_and_cursed() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      // create zero value input
+      context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, Default::default())],
+        fee: 50 * 100_000_000,
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let witness = inscription("text/plain", "hello").to_witness();
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(2, 0, 0, witness.clone()), (2, 1, 0, witness.clone())],
+        ..default()
+      });
+
+      let second_inscription_id = InscriptionId { txid, index: 1 };
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        second_inscription_id,
+        SatPoint {
+          outpoint: unbound_outpoint(),
+          offset: 0,
+        },
+        None,
+      );
+
+      assert_eq!(context.index.inscription_number(second_inscription_id), -1);
+    }
+  }
+
+  #[test]
+  fn multiple_inscriptions_in_same_tx_all_but_first_input_are_cursed() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+      context.mine_blocks(1);
+      context.mine_blocks(1);
+
+      let witness = envelope(&[b"ord", &[1], b"text/plain;charset=utf-8", &[], b"bar"]);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[
+          (1, 0, 0, witness.clone()),
+          (2, 0, 0, witness.clone()),
+          (3, 0, 0, witness.clone()),
+        ],
+        ..default()
+      });
+
+      let first = InscriptionId { txid, index: 0 };
+      let second = InscriptionId { txid, index: 1 };
+      let third = InscriptionId { txid, index: 2 };
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        first,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+
+      context.index.assert_inscription_location(
+        second,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 50 * COIN_VALUE,
+        },
+        Some(100 * COIN_VALUE),
+      );
+
+      context.index.assert_inscription_location(
+        third,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 100 * COIN_VALUE,
+        },
+        Some(150 * COIN_VALUE),
+      );
+
+      assert_eq!(context.index.inscription_number(first), 0);
+      assert_eq!(context.index.inscription_number(second), -1);
+      assert_eq!(context.index.inscription_number(third), -2);
+    }
+  }
+
+  #[test]
+  fn multiple_inscriptions_same_input_are_cursed_reinscriptions() {
+    for context in Context::configurations() {
+      context.core.mine_blocks(1);
+
+      let script = script::Builder::new()
+        .push_opcode(opcodes::OP_FALSE)
+        .push_opcode(opcodes::all::OP_IF)
+        .push_slice(b"ord")
+        .push_slice([1])
+        .push_slice(b"text/plain;charset=utf-8")
+        .push_slice([])
+        .push_slice(b"foo")
+        .push_opcode(opcodes::all::OP_ENDIF)
+        .push_opcode(opcodes::OP_FALSE)
+        .push_opcode(opcodes::all::OP_IF)
+        .push_slice(b"ord")
+        .push_slice([1])
+        .push_slice(b"text/plain;charset=utf-8")
+        .push_slice([])
+        .push_slice(b"bar")
+        .push_opcode(opcodes::all::OP_ENDIF)
+        .push_opcode(opcodes::OP_FALSE)
+        .push_opcode(opcodes::all::OP_IF)
+        .push_slice(b"ord")
+        .push_slice([1])
+        .push_slice(b"text/plain;charset=utf-8")
+        .push_slice([])
+        .push_slice(b"qix")
+        .push_opcode(opcodes::all::OP_ENDIF)
+        .into_script();
+
+      let witness = Witness::from_slice(&[script.into_bytes(), Vec::new()]);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, witness)],
+        ..default()
+      });
+
+      let first = InscriptionId { txid, index: 0 };
+      let second = InscriptionId { txid, index: 1 };
+      let third = InscriptionId { txid, index: 2 };
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        first,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+
+      context.index.assert_inscription_location(
+        second,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+
+      context.index.assert_inscription_location(
+        third,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+
+      assert_eq!(context.index.inscription_number(first), 0);
+      assert_eq!(context.index.inscription_number(second), -1);
+      assert_eq!(context.index.inscription_number(third), -2);
+    }
+  }
+
+  #[test]
+  fn multiple_inscriptions_different_inputs_and_same_inputs() {
+    for context in Context::configurations() {
+      context.core.mine_blocks(1);
+      context.core.mine_blocks(1);
+      context.core.mine_blocks(1);
+
+      let script = script::Builder::new()
+        .push_opcode(opcodes::OP_FALSE)
+        .push_opcode(opcodes::all::OP_IF)
+        .push_slice(b"ord")
+        .push_slice([1])
+        .push_slice(b"text/plain;charset=utf-8")
+        .push_slice([])
+        .push_slice(b"foo")
+        .push_opcode(opcodes::all::OP_ENDIF)
+        .push_opcode(opcodes::OP_FALSE)
+        .push_opcode(opcodes::all::OP_IF)
+        .push_slice(b"ord")
+        .push_slice([1])
+        .push_slice(b"text/plain;charset=utf-8")
+        .push_slice([])
+        .push_slice(b"bar")
+        .push_opcode(opcodes::all::OP_ENDIF)
+        .push_opcode(opcodes::OP_FALSE)
+        .push_opcode(opcodes::all::OP_IF)
+        .push_slice(b"ord")
+        .push_slice([1])
+        .push_slice(b"text/plain;charset=utf-8")
+        .push_slice([])
+        .push_slice(b"qix")
+        .push_opcode(opcodes::all::OP_ENDIF)
+        .into_script();
+
+      let witness = Witness::from_slice(&[script.into_bytes(), Vec::new()]);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[
+          (1, 0, 0, witness.clone()),
+          (2, 0, 0, witness.clone()),
+          (3, 0, 0, witness.clone()),
+        ],
+        ..default()
+      });
+
+      let first = InscriptionId { txid, index: 0 }; // normal
+      let second = InscriptionId { txid, index: 1 }; // cursed reinscription
+      let fourth = InscriptionId { txid, index: 3 }; // cursed but bound
+      let ninth = InscriptionId { txid, index: 8 }; // cursed reinscription
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        first,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+
+      context.index.assert_inscription_location(
+        second,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+
+      context.index.assert_inscription_location(
+        fourth,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 50 * COIN_VALUE,
+        },
+        Some(100 * COIN_VALUE),
+      );
+
+      context.index.assert_inscription_location(
+        ninth,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 100 * COIN_VALUE,
+        },
+        Some(150 * COIN_VALUE),
+      );
+
+      assert_eq!(context.index.inscription_number(first), 0);
+
+      assert_eq!(
+        context
+          .index
+          .get_inscription_id_by_inscription_number(-3)
+          .unwrap()
+          .unwrap(),
+        fourth
+      );
+
+      assert_eq!(context.index.inscription_number(fourth), -3);
+
+      assert_eq!(context.index.inscription_number(ninth), -8);
+    }
+  }
+
+  #[test]
+  fn inscription_fee_distributed_evenly() {
+    for context in Context::configurations() {
+      context.core.mine_blocks(1);
+
+      let script = script::Builder::new()
+        .push_opcode(opcodes::OP_FALSE)
+        .push_opcode(opcodes::all::OP_IF)
+        .push_slice(b"ord")
+        .push_slice([1])
+        .push_slice(b"text/plain;charset=utf-8")
+        .push_slice([])
+        .push_slice(b"foo")
+        .push_opcode(opcodes::all::OP_ENDIF)
+        .push_opcode(opcodes::OP_FALSE)
+        .push_opcode(opcodes::all::OP_IF)
+        .push_slice(b"ord")
+        .push_slice([1])
+        .push_slice(b"text/plain;charset=utf-8")
+        .push_slice([])
+        .push_slice(b"bar")
+        .push_opcode(opcodes::all::OP_ENDIF)
+        .push_opcode(opcodes::OP_FALSE)
+        .push_opcode(opcodes::all::OP_IF)
+        .push_slice(b"ord")
+        .push_slice([1])
+        .push_slice(b"text/plain;charset=utf-8")
+        .push_slice([])
+        .push_slice(b"qix")
+        .push_opcode(opcodes::all::OP_ENDIF)
+        .into_script();
+
+      let witness = Witness::from_slice(&[script.into_bytes(), Vec::new()]);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, witness)],
+        fee: 33,
+        ..default()
+      });
+
+      let first = InscriptionId { txid, index: 0 };
+      let second = InscriptionId { txid, index: 1 };
+
+      context.mine_blocks(1);
+
+      assert_eq!(
+        context
+          .index
+          .get_inscription_entry(first)
+          .unwrap()
+          .unwrap()
+          .fee,
+        11
+      );
+
+      assert_eq!(
+        context
+          .index
+          .get_inscription_entry(second)
+          .unwrap()
+          .unwrap()
+          .fee,
+        11
+      );
+    }
+  }
+
+  #[test]
+  fn reinscription_on_cursed_inscription_is_not_cursed() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+      context.mine_blocks(1);
+
+      let witness = envelope(&[b"ord", &[1], b"text/plain;charset=utf-8", &[], b"bar"]);
+
+      let cursed_txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, witness.clone()), (2, 0, 0, witness.clone())],
+        outputs: 2,
+        ..default()
+      });
+
+      let cursed = InscriptionId {
+        txid: cursed_txid,
+        index: 1,
+      };
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        cursed,
+        SatPoint {
+          outpoint: OutPoint {
+            txid: cursed_txid,
+            vout: 1,
+          },
+          offset: 0,
+        },
+        Some(100 * COIN_VALUE),
+      );
+
+      assert_eq!(context.index.inscription_number(cursed), -1);
+
+      let witness = envelope(&[
+        b"ord",
+        &[1],
+        b"text/plain;charset=utf-8",
+        &[],
+        b"reinscription on cursed",
+      ]);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(3, 1, 1, witness)],
+        ..default()
+      });
+
+      let reinscription_on_cursed = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        reinscription_on_cursed,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(100 * COIN_VALUE),
+      );
+
+      assert_eq!(context.index.inscription_number(reinscription_on_cursed), 1);
+    }
+  }
+
+  #[test]
+  fn second_reinscription_on_cursed_inscription_is_cursed() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+      context.mine_blocks(1);
+
+      let witness = envelope(&[b"ord", &[1], b"text/plain;charset=utf-8", &[], b"bar"]);
+
+      let cursed_txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, witness.clone()), (2, 0, 0, witness.clone())],
+        outputs: 2,
+        ..default()
+      });
+
+      let cursed = InscriptionId {
+        txid: cursed_txid,
+        index: 1,
+      };
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        cursed,
+        SatPoint {
+          outpoint: OutPoint {
+            txid: cursed_txid,
+            vout: 1,
+          },
+          offset: 0,
+        },
+        Some(100 * COIN_VALUE),
+      );
+
+      assert_eq!(context.index.inscription_number(cursed), -1);
+
+      let witness = envelope(&[
+        b"ord",
+        &[1],
+        b"text/plain;charset=utf-8",
+        &[],
+        b"reinscription on cursed",
+      ]);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(3, 1, 1, witness)],
+        ..default()
+      });
+
+      let reinscription_on_cursed = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        reinscription_on_cursed,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(100 * COIN_VALUE),
+      );
+
+      assert_eq!(context.index.inscription_number(reinscription_on_cursed), 1);
+
+      let witness = envelope(&[
+        b"ord",
+        &[1],
+        b"text/plain;charset=utf-8",
+        &[],
+        b"second reinscription on cursed",
+      ]);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(4, 1, 0, witness)],
+        ..default()
+      });
+
+      let second_reinscription_on_cursed = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      context.index.assert_inscription_location(
+        second_reinscription_on_cursed,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(100 * COIN_VALUE),
+      );
+
+      assert_eq!(
+        context
+          .index
+          .inscription_number(second_reinscription_on_cursed),
+        -2
+      );
+
+      assert_eq!(
+        vec![
+          cursed,
+          reinscription_on_cursed,
+          second_reinscription_on_cursed
+        ],
+        context
+          .index
+          .get_inscriptions_on_output_with_satpoints(OutPoint { txid, vout: 0 })
+          .unwrap()
+          .iter()
+          .map(|(_satpoint, inscription_id)| *inscription_id)
+          .collect::<Vec<InscriptionId>>()
+      )
+    }
+  }
+
+  #[test]
+  fn reinscriptions_on_output_correctly_ordered_and_transferred() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(
+          1,
+          0,
+          0,
+          inscription("text/plain;charset=utf-8", "hello").to_witness(),
+        )],
+        ..default()
+      });
+
+      let first = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(
+          2,
+          1,
+          0,
+          inscription("text/plain;charset=utf-8", "hello").to_witness(),
+        )],
+        ..default()
+      });
+
+      let second = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(
+          3,
+          1,
+          0,
+          inscription("text/plain;charset=utf-8", "hello").to_witness(),
+        )],
+        ..default()
+      });
+
+      let third = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      let location = SatPoint {
+        outpoint: OutPoint { txid, vout: 0 },
+        offset: 0,
+      };
+
+      assert_eq!(
+        vec![(location, first), (location, second), (location, third)],
+        context
+          .index
+          .get_inscriptions_on_output_with_satpoints(OutPoint { txid, vout: 0 })
+          .unwrap()
+      )
+    }
+  }
+
+  #[test]
+  fn reinscriptions_are_ordered_correctly_for_many_outpoints() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let mut inscription_ids = Vec::new();
+      for i in 1..=21 {
+        let txid = context.core.broadcast_tx(TransactionTemplate {
+          inputs: &[(
+            i,
+            if i == 1 { 0 } else { 1 },
+            0,
+            inscription("text/plain;charset=utf-8", &format!("hello {}", i)).to_witness(),
+          )], // for the first inscription use coinbase, otherwise use the previous tx
+          ..default()
+        });
+
+        inscription_ids.push(InscriptionId { txid, index: 0 });
+
+        context.mine_blocks(1);
+      }
+
+      let final_txid = inscription_ids.last().unwrap().txid;
+      let location = SatPoint {
+        outpoint: OutPoint {
+          txid: final_txid,
+          vout: 0,
+        },
+        offset: 0,
+      };
+
+      let expected_result = inscription_ids
+        .iter()
+        .map(|id| (location, *id))
+        .collect::<Vec<(SatPoint, InscriptionId)>>();
+
+      assert_eq!(
+        expected_result,
+        context
+          .index
+          .get_inscriptions_on_output_with_satpoints(OutPoint {
+            txid: final_txid,
+            vout: 0
+          })
+          .unwrap()
+      )
+    }
+  }
+
+  #[test]
+  fn recover_from_reorg() {
+    for mut context in Context::configurations() {
+      context.index.set_durability(redb::Durability::Immediate);
+
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(
+          1,
+          0,
+          0,
+          inscription("text/plain;charset=utf-8", "hello").to_witness(),
+        )],
+        ..default()
+      });
+      let first_id = InscriptionId { txid, index: 0 };
+      let first_location = SatPoint {
+        outpoint: OutPoint { txid, vout: 0 },
+        offset: 0,
+      };
+
+      context.mine_blocks(6);
+
+      context
+        .index
+        .assert_inscription_location(first_id, first_location, Some(50 * COIN_VALUE));
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(
+          2,
+          0,
+          0,
+          inscription("text/plain;charset=utf-8", "hello").to_witness(),
+        )],
+        ..default()
+      });
+      let second_id = InscriptionId { txid, index: 0 };
+      let second_location = SatPoint {
+        outpoint: OutPoint { txid, vout: 0 },
+        offset: 0,
+      };
+
+      context.mine_blocks(1);
+
+      context
+        .index
+        .assert_inscription_location(second_id, second_location, Some(100 * COIN_VALUE));
+
+      context.core.invalidate_tip();
+      context.mine_blocks(2);
+
+      context
+        .index
+        .assert_inscription_location(first_id, first_location, Some(50 * COIN_VALUE));
+
+      assert!(!context.index.inscription_exists(second_id).unwrap());
+    }
+  }
+
+  #[test]
+  fn recover_from_3_block_deep_and_consecutive_reorg() {
+    for mut context in Context::configurations() {
+      context.index.set_durability(redb::Durability::Immediate);
+
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(
+          1,
+          0,
+          0,
+          inscription("text/plain;charset=utf-8", "hello").to_witness(),
+        )],
+        ..default()
+      });
+      let first_id = InscriptionId { txid, index: 0 };
+      let first_location = SatPoint {
+        outpoint: OutPoint { txid, vout: 0 },
+        offset: 0,
+      };
+
+      context.mine_blocks(10);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(
+          2,
+          0,
+          0,
+          inscription("text/plain;charset=utf-8", "hello").to_witness(),
+        )],
+        ..default()
+      });
+      let second_id = InscriptionId { txid, index: 0 };
+      let second_location = SatPoint {
+        outpoint: OutPoint { txid, vout: 0 },
+        offset: 0,
+      };
+
+      context.mine_blocks(1);
+
+      context
+        .index
+        .assert_inscription_location(second_id, second_location, Some(100 * COIN_VALUE));
+
+      context.core.invalidate_tip();
+      context.core.invalidate_tip();
+      context.core.invalidate_tip();
+
+      context.mine_blocks(4);
+
+      assert!(!context.index.inscription_exists(second_id).unwrap());
+
+      context.core.invalidate_tip();
+
+      context.mine_blocks(2);
+
+      context
+        .index
+        .assert_inscription_location(first_id, first_location, Some(50 * COIN_VALUE));
+    }
+  }
+
+  #[test]
+  fn recover_from_very_unlikely_7_block_deep_reorg() {
+    for mut context in Context::configurations() {
+      context.index.set_durability(redb::Durability::Immediate);
+
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(
+          1,
+          0,
+          0,
+          inscription("text/plain;charset=utf-8", "hello").to_witness(),
+        )],
+        ..default()
+      });
+
+      context.mine_blocks(11);
+
+      let first_id = InscriptionId { txid, index: 0 };
+      let first_location = SatPoint {
+        outpoint: OutPoint { txid, vout: 0 },
+        offset: 0,
+      };
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(
+          2,
+          0,
+          0,
+          inscription("text/plain;charset=utf-8", "hello").to_witness(),
+        )],
+        ..default()
+      });
+
+      let second_id = InscriptionId { txid, index: 0 };
+      let second_location = SatPoint {
+        outpoint: OutPoint { txid, vout: 0 },
+        offset: 0,
+      };
+
+      context.mine_blocks(7);
+
+      context
+        .index
+        .assert_inscription_location(second_id, second_location, Some(100 * COIN_VALUE));
+
+      for _ in 0..7 {
+        context.core.invalidate_tip();
+      }
+
+      context.mine_blocks(9);
+
+      assert!(!context.index.inscription_exists(second_id).unwrap());
+
+      context
+        .index
+        .assert_inscription_location(first_id, first_location, Some(50 * COIN_VALUE));
+    }
+  }
+
+  #[test]
+  fn inscription_without_parent_tag_has_no_parent_entry() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      assert!(context
+        .index
+        .get_inscription_entry(inscription_id)
+        .unwrap()
+        .unwrap()
+        .parents
+        .is_empty());
+    }
+  }
+
+  #[test]
+  fn inscription_with_parent_tag_without_parent_has_no_parent_entry() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let parent_txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let parent_inscription_id = InscriptionId {
+        txid: parent_txid,
+        index: 0,
+      };
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(
+          2,
+          0,
+          0,
+          Inscription {
+            content_type: Some("text/plain".into()),
+            body: Some("hello".into()),
+            parents: vec![parent_inscription_id.value()],
+            ..default()
+          }
+          .to_witness(),
+        )],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      assert!(context
+        .index
+        .get_inscription_entry(inscription_id)
+        .unwrap()
+        .unwrap()
+        .parents
+        .is_empty());
+    }
+  }
+
+  #[test]
+  fn inscription_with_parent_tag_and_parent_has_parent_entry() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let parent_txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let parent_inscription_id = InscriptionId {
+        txid: parent_txid,
+        index: 0,
+      };
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(
+          2,
+          1,
+          0,
+          Inscription {
+            content_type: Some("text/plain".into()),
+            body: Some("hello".into()),
+            parents: vec![parent_inscription_id.value()],
+            ..default()
+          }
+          .to_witness(),
+        )],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      assert_eq!(
+        context.index.get_parents_by_inscription_id(inscription_id),
+        vec![parent_inscription_id]
+      );
+
+      assert_eq!(
+        context
+          .index
+          .get_children_by_inscription_id(parent_inscription_id)
+          .unwrap(),
+        vec![inscription_id]
+      );
+    }
+  }
+
+  #[test]
+  fn inscription_with_two_parent_tags_and_parents_has_parent_entries() {
+    for context in Context::configurations() {
+      context.mine_blocks(2);
+
+      let parent_txid_a = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+      let parent_txid_b = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(2, 0, 0, inscription("text/plain", "world").to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let parent_inscription_id_a = InscriptionId {
+        txid: parent_txid_a,
+        index: 0,
+      };
+      let parent_inscription_id_b = InscriptionId {
+        txid: parent_txid_b,
+        index: 0,
+      };
+
+      let multi_parent_inscription = Inscription {
+        content_type: Some("text/plain".into()),
+        body: Some("hello".into()),
+        parents: vec![
+          parent_inscription_id_a.value(),
+          parent_inscription_id_b.value(),
+        ],
+        ..default()
+      };
+      let multi_parent_witness = multi_parent_inscription.to_witness();
+
+      let revelation_input = (3, 1, 0, multi_parent_witness);
+
+      let parent_b_input = (3, 2, 0, Witness::new());
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[revelation_input, parent_b_input],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      assert_eq!(
+        context.index.get_parents_by_inscription_id(inscription_id),
+        vec![parent_inscription_id_a, parent_inscription_id_b]
+      );
+
+      assert_eq!(
+        context
+          .index
+          .get_children_by_inscription_id(parent_inscription_id_a)
+          .unwrap(),
+        vec![inscription_id]
+      );
+      assert_eq!(
+        context
+          .index
+          .get_children_by_inscription_id(parent_inscription_id_b)
+          .unwrap(),
+        vec![inscription_id]
+      );
+    }
+  }
+
+  #[test]
+  fn inscription_with_repeated_parent_tags_and_parents_has_singular_parent_entry() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let parent_txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let parent_inscription_id = InscriptionId {
+        txid: parent_txid,
+        index: 0,
+      };
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(
+          2,
+          1,
+          0,
+          Inscription {
+            content_type: Some("text/plain".into()),
+            body: Some("hello".into()),
+            parents: vec![parent_inscription_id.value(), parent_inscription_id.value()],
+            ..default()
+          }
+          .to_witness(),
+        )],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      assert_eq!(
+        context.index.get_parents_by_inscription_id(inscription_id),
+        vec![parent_inscription_id]
+      );
+
+      assert_eq!(
+        context
+          .index
+          .get_children_by_inscription_id(parent_inscription_id)
+          .unwrap(),
+        vec![inscription_id]
+      );
+    }
+  }
+
+  #[test]
+  fn inscription_with_distinct_parent_tag_encodings_for_same_parent_has_singular_parent_entry() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let parent_txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let parent_inscription_id = InscriptionId {
+        txid: parent_txid,
+        index: 0,
+      };
+
+      let trailing_zero_inscription_id: Vec<u8> = parent_inscription_id
+        .value()
+        .into_iter()
+        .chain(vec![0, 0, 0, 0])
+        .collect();
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(
+          2,
+          1,
+          0,
+          Inscription {
+            content_type: Some("text/plain".into()),
+            body: Some("hello".into()),
+            parents: vec![parent_inscription_id.value(), trailing_zero_inscription_id],
+            ..default()
+          }
+          .to_witness(),
+        )],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      assert_eq!(
+        context.index.get_parents_by_inscription_id(inscription_id),
+        vec![parent_inscription_id]
+      );
+
+      assert_eq!(
+        context
+          .index
+          .get_children_by_inscription_id(parent_inscription_id)
+          .unwrap(),
+        vec![inscription_id]
+      );
+    }
+  }
+
+  #[test]
+  fn inscription_with_three_parent_tags_and_two_parents_has_two_parent_entries() {
+    for context in Context::configurations() {
+      context.mine_blocks(3);
+
+      let parent_txid_a = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+      let parent_txid_b = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(2, 0, 0, inscription("text/plain", "world").to_witness())],
+        ..default()
+      });
+      let parent_txid_c = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(3, 0, 0, inscription("text/plain", "wazzup").to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let parent_inscription_id_a = InscriptionId {
+        txid: parent_txid_a,
+        index: 0,
+      };
+      let parent_inscription_id_b = InscriptionId {
+        txid: parent_txid_b,
+        index: 0,
+      };
+      let parent_inscription_id_c = InscriptionId {
+        txid: parent_txid_c,
+        index: 0,
+      };
+
+      let multi_parent_inscription = Inscription {
+        content_type: Some("text/plain".into()),
+        body: Some("hello".into()),
+        parents: vec![
+          parent_inscription_id_a.value(),
+          parent_inscription_id_b.value(),
+          parent_inscription_id_c.value(),
+        ],
+        ..default()
+      };
+      let multi_parent_witness = multi_parent_inscription.to_witness();
+
+      let revealing_parent_a_input = (4, 1, 0, multi_parent_witness);
+
+      let parent_c_input = (4, 3, 0, Witness::new());
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[revealing_parent_a_input, parent_c_input],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      assert_eq!(
+        context.index.get_parents_by_inscription_id(inscription_id),
+        vec![parent_inscription_id_a, parent_inscription_id_c]
+      );
+
+      assert_eq!(
+        context
+          .index
+          .get_children_by_inscription_id(parent_inscription_id_a)
+          .unwrap(),
+        vec![inscription_id]
+      );
+      assert_eq!(
+        context
+          .index
+          .get_children_by_inscription_id(parent_inscription_id_b)
+          .unwrap(),
+        Vec::new()
+      );
+      assert_eq!(
+        context
+          .index
+          .get_children_by_inscription_id(parent_inscription_id_c)
+          .unwrap(),
+        vec![inscription_id]
+      );
+    }
+  }
+
+  #[test]
+  fn inscription_with_valid_and_malformed_parent_tags_only_lists_valid_entries() {
+    for context in Context::configurations() {
+      context.mine_blocks(3);
+
+      let parent_txid_a = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+      let parent_txid_b = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(2, 0, 0, inscription("text/plain", "world").to_witness())],
+        ..default()
+      });
+      let parent_txid_c = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(3, 0, 0, inscription("text/plain", "wazzup").to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let parent_inscription_id_a = InscriptionId {
+        txid: parent_txid_a,
+        index: 0,
+      };
+      let parent_inscription_id_b = InscriptionId {
+        txid: parent_txid_b,
+        index: 0,
+      };
+      let parent_inscription_id_c = InscriptionId {
+        txid: parent_txid_c,
+        index: 0,
+      };
+
+      let malformed_inscription_id_b = parent_inscription_id_b
+        .value()
+        .into_iter()
+        .chain(iter::once(0))
+        .collect();
+
+      let multi_parent_inscription = Inscription {
+        content_type: Some("text/plain".into()),
+        body: Some("hello".into()),
+        parents: vec![
+          parent_inscription_id_a.value(),
+          malformed_inscription_id_b,
+          parent_inscription_id_c.value(),
+        ],
+        ..default()
+      };
+      let multi_parent_witness = multi_parent_inscription.to_witness();
+
+      let revealing_parent_a_input = (4, 1, 0, multi_parent_witness);
+      let parent_b_input = (4, 2, 0, Witness::new());
+      let parent_c_input = (4, 3, 0, Witness::new());
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[revealing_parent_a_input, parent_b_input, parent_c_input],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      assert_eq!(
+        context.index.get_parents_by_inscription_id(inscription_id),
+        vec![parent_inscription_id_a, parent_inscription_id_c]
+      );
+
+      assert_eq!(
+        context
+          .index
+          .get_children_by_inscription_id(parent_inscription_id_a)
+          .unwrap(),
+        vec![inscription_id]
+      );
+      assert_eq!(
+        context
+          .index
+          .get_children_by_inscription_id(parent_inscription_id_b)
+          .unwrap(),
+        Vec::new()
+      );
+      assert_eq!(
+        context
+          .index
+          .get_children_by_inscription_id(parent_inscription_id_c)
+          .unwrap(),
+        vec![inscription_id]
+      );
+    }
+  }
+
+  #[test]
+  fn parents_can_be_in_preceding_input() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let parent_txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(2);
+
+      let parent_inscription_id = InscriptionId {
+        txid: parent_txid,
+        index: 0,
+      };
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[
+          (2, 1, 0, Default::default()),
+          (
+            3,
+            0,
+            0,
+            Inscription {
+              content_type: Some("text/plain".into()),
+              body: Some("hello".into()),
+              parents: vec![parent_inscription_id.value()],
+              ..default()
+            }
+            .to_witness(),
+          ),
+        ],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      assert_eq!(
+        context.index.get_parents_by_inscription_id(inscription_id),
+        vec![parent_inscription_id]
+      );
+
+      assert_eq!(
+        context
+          .index
+          .get_children_by_inscription_id(parent_inscription_id)
+          .unwrap(),
+        vec![inscription_id]
+      );
+    }
+  }
+
+  #[test]
+  fn parents_can_be_in_following_input() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let parent_txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(2);
+
+      let parent_inscription_id = InscriptionId {
+        txid: parent_txid,
+        index: 0,
+      };
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[
+          (
+            3,
+            0,
+            0,
+            Inscription {
+              content_type: Some("text/plain".into()),
+              body: Some("hello".into()),
+              parents: vec![parent_inscription_id.value()],
+              ..default()
+            }
+            .to_witness(),
+          ),
+          (2, 1, 0, Default::default()),
+        ],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      assert_eq!(
+        context.index.get_parents_by_inscription_id(inscription_id),
+        vec![parent_inscription_id]
+      );
+
+      assert_eq!(
+        context
+          .index
+          .get_children_by_inscription_id(parent_inscription_id)
+          .unwrap(),
+        vec![inscription_id]
+      );
+    }
+  }
+
+  #[test]
+  fn inscription_with_invalid_parent_tag_and_parent_has_no_parent_entry() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let parent_txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let parent_inscription_id = InscriptionId {
+        txid: parent_txid,
+        index: 0,
+      };
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(
+          2,
+          1,
+          0,
+          Inscription {
+            content_type: Some("text/plain".into()),
+            body: Some("hello".into()),
+            parents: vec![parent_inscription_id
+              .value()
+              .into_iter()
+              .chain(iter::once(0))
+              .collect()],
+            ..default()
+          }
+          .to_witness(),
+        )],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      assert!(context
+        .index
+        .get_inscription_entry(inscription_id)
+        .unwrap()
+        .unwrap()
+        .parents
+        .is_empty());
+    }
+  }
+
+  #[test]
+  fn inscription_with_pointer() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let inscription = Inscription {
+        content_type: Some("text/plain".into()),
+        body: Some("hello".into()),
+        pointer: Some(100u64.to_le_bytes().to_vec()),
+        ..default()
+      };
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription.to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 100,
+        },
+        Some(50 * COIN_VALUE + 100),
+      );
+    }
+  }
+
+  #[test]
+  fn inscription_with_pointer_greater_than_output_value_assigned_default() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let inscription = Inscription {
+        content_type: Some("text/plain".into()),
+        body: Some("hello".into()),
+        pointer: Some((50 * COIN_VALUE).to_le_bytes().to_vec()),
+        ..default()
+      };
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription.to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+    }
+  }
+
+  #[test]
+  fn inscription_with_pointer_into_fee_ignored_and_assigned_default_location() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let inscription = Inscription {
+        content_type: Some("text/plain".into()),
+        body: Some("hello".into()),
+        pointer: Some((25 * COIN_VALUE).to_le_bytes().to_vec()),
+        ..default()
+      };
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription.to_witness())],
+        fee: 25 * COIN_VALUE,
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+    }
+  }
+
+  #[test]
+  fn inscription_with_pointer_is_cursed() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let inscription = Inscription {
+        content_type: Some("text/plain".into()),
+        body: Some("pointer-child".into()),
+        pointer: Some(0u64.to_le_bytes().to_vec()),
+        ..default()
+      };
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription.to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+
+      assert_eq!(context.index.inscription_number(inscription_id), -1);
+    }
+  }
+
+  #[test]
+  fn inscription_with_pointer_to_parent_is_cursed_reinscription() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let parent_txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "parent").to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let parent_inscription_id = InscriptionId {
+        txid: parent_txid,
+        index: 0,
+      };
+
+      let child_inscription = Inscription {
+        content_type: Some("text/plain".into()),
+        body: Some("pointer-child".into()),
+        parents: vec![parent_inscription_id.value()],
+        pointer: Some(0u64.to_le_bytes().to_vec()),
+        ..default()
+      };
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(2, 1, 0, child_inscription.to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let child_inscription_id = InscriptionId { txid, index: 0 };
+
+      context.index.assert_inscription_location(
+        parent_inscription_id,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+
+      context.index.assert_inscription_location(
+        child_inscription_id,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+
+      assert_eq!(context.index.inscription_number(child_inscription_id), -1);
+
+      assert_eq!(
+        context
+          .index
+          .get_parents_by_inscription_id(child_inscription_id),
+        vec![parent_inscription_id]
+      );
+
+      assert_eq!(
+        context
+          .index
+          .get_children_by_inscription_id(parent_inscription_id)
+          .unwrap(),
+        vec![child_inscription_id]
+      );
+    }
+  }
+
+  #[test]
+  fn inscriptions_in_same_input_with_pointers_to_same_output() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let builder = script::Builder::new();
+
+      let builder = Inscription {
+        pointer: Some(100u64.to_le_bytes().to_vec()),
+        ..default()
+      }
+      .append_reveal_script_to_builder(builder);
+
+      let builder = Inscription {
+        pointer: Some(300_000u64.to_le_bytes().to_vec()),
+        ..default()
+      }
+      .append_reveal_script_to_builder(builder);
+
+      let builder = Inscription {
+        pointer: Some(1_000_000u64.to_le_bytes().to_vec()),
+        ..default()
+      }
+      .append_reveal_script_to_builder(builder);
+
+      let witness = Witness::from_slice(&[builder.into_bytes(), Vec::new()]);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, witness)],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let first = InscriptionId { txid, index: 0 };
+      let second = InscriptionId { txid, index: 1 };
+      let third = InscriptionId { txid, index: 2 };
+
+      context.index.assert_inscription_location(
+        first,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 100,
+        },
+        Some(50 * COIN_VALUE + 100),
+      );
+
+      context.index.assert_inscription_location(
+        second,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 300_000,
+        },
+        Some(50 * COIN_VALUE + 300_000),
+      );
+
+      context.index.assert_inscription_location(
+        third,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 1_000_000,
+        },
+        Some(50 * COIN_VALUE + 1_000_000),
+      );
+    }
+  }
+
+  #[test]
+  fn inscriptions_in_same_input_with_pointers_to_different_outputs() {
+    for context in Context::configurations() {
+      context.mine_blocks_with_subsidy(1, 300_000);
+
+      let builder = script::Builder::new();
+
+      let builder = Inscription {
+        pointer: Some(100u64.to_le_bytes().to_vec()),
+        ..default()
+      }
+      .append_reveal_script_to_builder(builder);
+
+      let builder = Inscription {
+        pointer: Some(100_111u64.to_le_bytes().to_vec()),
+        ..default()
+      }
+      .append_reveal_script_to_builder(builder);
+
+      let builder = Inscription {
+        pointer: Some(299_999u64.to_le_bytes().to_vec()),
+        ..default()
+      }
+      .append_reveal_script_to_builder(builder);
+
+      let witness = Witness::from_slice(&[builder.into_bytes(), Vec::new()]);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, witness)],
+        outputs: 3,
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let first = InscriptionId { txid, index: 0 };
+      let second = InscriptionId { txid, index: 1 };
+      let third = InscriptionId { txid, index: 2 };
+
+      context.index.assert_inscription_location(
+        first,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 100,
+        },
+        Some(50 * COIN_VALUE + 100),
+      );
+
+      context.index.assert_inscription_location(
+        second,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 1 },
+          offset: 111,
+        },
+        Some(50 * COIN_VALUE + 100_111),
+      );
+
+      context.index.assert_inscription_location(
+        third,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 2 },
+          offset: 99_999,
+        },
+        Some(50 * COIN_VALUE + 299_999),
+      );
+    }
+  }
+
+  #[test]
+  fn inscriptions_in_different_inputs_with_pointers_to_different_outputs() {
+    for context in Context::configurations() {
+      context.mine_blocks(3);
+
+      let inscription_for_second_output = Inscription {
+        content_type: Some("text/plain".into()),
+        body: Some("hello jupiter".into()),
+        pointer: Some((50 * COIN_VALUE).to_le_bytes().to_vec()),
+        ..default()
+      };
+
+      let inscription_for_third_output = Inscription {
+        content_type: Some("text/plain".into()),
+        body: Some("hello mars".into()),
+        pointer: Some((100 * COIN_VALUE).to_le_bytes().to_vec()),
+        ..default()
+      };
+
+      let inscription_for_first_output = Inscription {
+        content_type: Some("text/plain".into()),
+        body: Some("hello world".into()),
+        pointer: Some(0u64.to_le_bytes().to_vec()),
+        ..default()
+      };
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[
+          (1, 0, 0, inscription_for_second_output.to_witness()),
+          (2, 0, 0, inscription_for_third_output.to_witness()),
+          (3, 0, 0, inscription_for_first_output.to_witness()),
+        ],
+        outputs: 3,
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_for_second_output = InscriptionId { txid, index: 0 };
+      let inscription_for_third_output = InscriptionId { txid, index: 1 };
+      let inscription_for_first_output = InscriptionId { txid, index: 2 };
+
+      context.index.assert_inscription_location(
+        inscription_for_second_output,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 1 },
+          offset: 0,
+        },
+        Some(100 * COIN_VALUE),
+      );
+
+      context.index.assert_inscription_location(
+        inscription_for_third_output,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 2 },
+          offset: 0,
+        },
+        Some(150 * COIN_VALUE),
+      );
+
+      context.index.assert_inscription_location(
+        inscription_for_first_output,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+    }
+  }
+
+  #[test]
+  fn inscriptions_in_different_inputs_with_pointers_to_same_output() {
+    for context in Context::configurations() {
+      context.mine_blocks(3);
+
+      let first_inscription = Inscription {
+        content_type: Some("text/plain".into()),
+        body: Some("hello jupiter".into()),
+        ..default()
+      };
+
+      let second_inscription = Inscription {
+        content_type: Some("text/plain".into()),
+        body: Some("hello mars".into()),
+        pointer: Some(1u64.to_le_bytes().to_vec()),
+        ..default()
+      };
+
+      let third_inscription = Inscription {
+        content_type: Some("text/plain".into()),
+        body: Some("hello world".into()),
+        pointer: Some(2u64.to_le_bytes().to_vec()),
+        ..default()
+      };
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[
+          (1, 0, 0, first_inscription.to_witness()),
+          (2, 0, 0, second_inscription.to_witness()),
+          (3, 0, 0, third_inscription.to_witness()),
+        ],
+        outputs: 1,
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let first_inscription_id = InscriptionId { txid, index: 0 };
+      let second_inscription_id = InscriptionId { txid, index: 1 };
+      let third_inscription_id = InscriptionId { txid, index: 2 };
+
+      context.index.assert_inscription_location(
+        first_inscription_id,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+
+      context.index.assert_inscription_location(
+        second_inscription_id,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 1,
+        },
+        Some(50 * COIN_VALUE + 1),
+      );
+
+      context.index.assert_inscription_location(
+        third_inscription_id,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 2,
+        },
+        Some(50 * COIN_VALUE + 2),
+      );
+    }
+  }
+
+  #[test]
+  fn inscriptions_with_pointers_to_same_sat_one_becomes_cursed_reinscriptions() {
+    for context in Context::configurations() {
+      context.mine_blocks(2);
+
+      let inscription = Inscription {
+        content_type: Some("text/plain".into()),
+        body: Some("hello jupiter".into()),
+        ..default()
+      };
+
+      let cursed_reinscription = Inscription {
+        content_type: Some("text/plain".into()),
+        body: Some("hello mars".into()),
+        pointer: Some(0u64.to_le_bytes().to_vec()),
+        ..default()
+      };
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[
+          (1, 0, 0, inscription.to_witness()),
+          (2, 0, 0, cursed_reinscription.to_witness()),
+        ],
+        outputs: 2,
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+      let cursed_reinscription_id = InscriptionId { txid, index: 1 };
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+
+      context.index.assert_inscription_location(
+        cursed_reinscription_id,
+        SatPoint {
+          outpoint: OutPoint { txid, vout: 0 },
+          offset: 0,
+        },
+        Some(50 * COIN_VALUE),
+      );
+
+      assert_eq!(context.index.inscription_number(inscription_id), 0);
+
+      assert_eq!(
+        context.index.inscription_number(cursed_reinscription_id),
+        -1
+      );
+    }
+  }
+
+  #[test]
+  fn inscribe_into_fee() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let inscription = Inscription::default();
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription.to_witness())],
+        fee: 50 * COIN_VALUE,
+        ..default()
+      });
+
+      let blocks = context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint {
+            txid: blocks[0].txdata[0].txid(),
+            vout: 0,
+          },
+          offset: 50 * COIN_VALUE,
+        },
+        Some(50 * COIN_VALUE),
+      );
+    }
+  }
+
+  #[test]
+  fn inscribe_into_fee_with_reduced_subsidy() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      let inscription = Inscription::default();
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription.to_witness())],
+        fee: 50 * COIN_VALUE,
+        ..default()
+      });
+
+      let blocks = context.mine_blocks_with_subsidy(1, 25 * COIN_VALUE);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.index.assert_inscription_location(
+        inscription_id,
+        SatPoint {
+          outpoint: OutPoint {
+            txid: blocks[0].txdata[0].txid(),
+            vout: 0,
+          },
+          offset: 50 * COIN_VALUE,
+        },
+        Some(50 * COIN_VALUE),
+      );
+    }
+  }
+
+  #[test]
+  fn pre_jubilee_first_reinscription_after_cursed_inscription_is_blessed() {
+    for context in Context::configurations() {
+      context.mine_blocks(1);
+
+      // Before the jubilee, an inscription on a sat using a pushnum opcode is
+      // cursed and not vindicated.
+
+      let script = script::Builder::new()
+        .push_opcode(opcodes::OP_FALSE)
+        .push_opcode(opcodes::all::OP_IF)
+        .push_slice(b"ord")
+        .push_slice([])
+        .push_opcode(opcodes::all::OP_PUSHNUM_1)
+        .push_opcode(opcodes::all::OP_ENDIF)
+        .into_script();
+
+      let witness = Witness::from_slice(&[script.into_bytes(), Vec::new()]);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, witness)],
+        ..default()
+      });
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      let entry = context
+        .index
+        .get_inscription_entry(inscription_id)
+        .unwrap()
+        .unwrap();
+
+      assert!(Charm::charms(entry.charms)
+        .iter()
+        .any(|charm| *charm == Charm::Cursed));
+
+      assert!(!Charm::charms(entry.charms)
+        .iter()
+        .any(|charm| *charm == Charm::Vindicated));
+
+      let sat = entry.sat;
+
+      assert_eq!(entry.inscription_number, -1);
+
+      // Before the jubilee, reinscription on the same sat is not cursed and
+      // not vindicated.
+
+      let inscription = Inscription::default();
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(2, 1, 0, inscription.to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      let entry = context
+        .index
+        .get_inscription_entry(inscription_id)
+        .unwrap()
+        .unwrap();
+
+      assert_eq!(entry.inscription_number, 0);
+
+      assert!(!Charm::charms(entry.charms)
+        .iter()
+        .any(|charm| *charm == Charm::Cursed));
+
+      assert!(!Charm::charms(entry.charms)
+        .iter()
+        .any(|charm| *charm == Charm::Vindicated));
+
+      assert_eq!(sat, entry.sat);
+
+      // Before the jubilee, a third reinscription on the same sat is cursed
+      // and not vindicated.
+
+      let inscription = Inscription::default();
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(3, 1, 0, inscription.to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      let entry = context
+        .index
+        .get_inscription_entry(inscription_id)
+        .unwrap()
+        .unwrap();
+
+      assert!(Charm::charms(entry.charms)
+        .iter()
+        .any(|charm| *charm == Charm::Cursed));
+
+      assert!(!Charm::charms(entry.charms)
+        .iter()
+        .any(|charm| *charm == Charm::Vindicated));
+
+      assert_eq!(entry.inscription_number, -2);
+
+      assert_eq!(sat, entry.sat);
+    }
+  }
+
+  #[test]
+  fn post_jubilee_first_reinscription_after_vindicated_inscription_not_vindicated() {
+    for context in Context::configurations() {
+      context.mine_blocks(110);
+      // After the jubilee, an inscription on a sat using a pushnum opcode is
+      // vindicated and not cursed.
+
+      let script = script::Builder::new()
+        .push_opcode(opcodes::OP_FALSE)
+        .push_opcode(opcodes::all::OP_IF)
+        .push_slice(b"ord")
+        .push_slice([])
+        .push_opcode(opcodes::all::OP_PUSHNUM_1)
+        .push_opcode(opcodes::all::OP_ENDIF)
+        .into_script();
+
+      let witness = Witness::from_slice(&[script.into_bytes(), Vec::new()]);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, witness)],
+        ..default()
+      });
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      let entry = context
+        .index
+        .get_inscription_entry(inscription_id)
+        .unwrap()
+        .unwrap();
+
+      assert!(!Charm::charms(entry.charms)
+        .iter()
+        .any(|charm| *charm == Charm::Cursed));
+
+      assert!(Charm::charms(entry.charms)
+        .iter()
+        .any(|charm| *charm == Charm::Vindicated));
+
+      let sat = entry.sat;
+
+      assert_eq!(entry.inscription_number, 0);
+
+      // After the jubilee, a reinscription on the same is not cursed and not
+      // vindicated.
+
+      let inscription = Inscription::default();
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(111, 1, 0, inscription.to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      let entry = context
+        .index
+        .get_inscription_entry(inscription_id)
+        .unwrap()
+        .unwrap();
+
+      assert!(!Charm::charms(entry.charms)
+        .iter()
+        .any(|charm| *charm == Charm::Cursed));
+
+      assert!(!Charm::charms(entry.charms)
+        .iter()
+        .any(|charm| *charm == Charm::Vindicated));
+
+      assert_eq!(entry.inscription_number, 1);
+
+      assert_eq!(sat, entry.sat);
+
+      // After the jubilee, a third reinscription on the same is vindicated and
+      // not cursed.
+
+      let inscription = Inscription::default();
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(112, 1, 0, inscription.to_witness())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let inscription_id = InscriptionId { txid, index: 0 };
+
+      let entry = context
+        .index
+        .get_inscription_entry(inscription_id)
+        .unwrap()
+        .unwrap();
+
+      assert!(!Charm::charms(entry.charms)
+        .iter()
+        .any(|charm| *charm == Charm::Cursed));
+
+      assert!(Charm::charms(entry.charms)
+        .iter()
+        .any(|charm| *charm == Charm::Vindicated));
+
+      assert_eq!(entry.inscription_number, 2);
+
+      assert_eq!(sat, entry.sat);
+    }
+  }
+
+  #[test]
+  fn index_spent_sats_retains_spent_sat_range_entries() {
+    let ranges = {
+      let context = Context::builder().arg("--index-sats").build();
+
+      context.mine_blocks(1);
+
+      let outpoint = OutPoint {
+        txid: context.core.tx(1, 0).into(),
+        vout: 0,
+      };
+
+      let ranges = context.index.list(outpoint).unwrap().unwrap();
+
+      assert!(!ranges.is_empty());
+
+      context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, Default::default())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      assert!(context.index.list(outpoint).unwrap().is_none());
+
+      ranges
+    };
+
+    {
+      let context = Context::builder()
+        .arg("--index-sats")
+        .arg("--index-spent-sats")
+        .build();
+
+      context.mine_blocks(1);
+
+      let outpoint = OutPoint {
+        txid: context.core.tx(1, 0).into(),
+        vout: 0,
+      };
+
+      let unspent_ranges = context.index.list(outpoint).unwrap().unwrap();
+
+      assert!(!unspent_ranges.is_empty());
+
+      assert_eq!(unspent_ranges, ranges);
+
+      context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, Default::default())],
+        ..default()
+      });
+
+      context.mine_blocks(1);
+
+      let spent_ranges = context.index.list(outpoint).unwrap().unwrap();
+
+      assert_eq!(spent_ranges, ranges);
+    }
+  }
+
+  #[test]
+  fn index_spent_sats_implies_index_sats() {
+    let context = Context::builder().arg("--index-spent-sats").build();
+
+    context.mine_blocks(1);
+
+    let outpoint = OutPoint {
+      txid: context.core.tx(1, 0).into(),
+      vout: 0,
+    };
+
+    context.core.broadcast_tx(TransactionTemplate {
+      inputs: &[(1, 0, 0, Default::default())],
+      ..default()
+    });
+
+    context.mine_blocks(1);
+
+    assert!(context.index.list(outpoint).unwrap().is_some());
+  }
+
+  #[test]
+  fn spent_sats_are_retained_after_flush() {
+    let context = Context::builder().arg("--index-spent-sats").build();
+
+    context.mine_blocks(1);
+
+    let txid = context.core.broadcast_tx(TransactionTemplate {
+      inputs: &[(1, 0, 0, Default::default())],
+      ..default()
+    });
+
+    context.mine_blocks_with_update(1, false);
+
+    let outpoint = OutPoint { txid, vout: 0 };
+
+    context.core.broadcast_tx(TransactionTemplate {
+      inputs: &[(2, 1, 0, Default::default())],
+      ..default()
+    });
+
+    context.mine_blocks(1);
+
+    assert!(context.index.list(outpoint).unwrap().is_some());
+  }
+
+  #[test]
+  fn is_output_spent() {
+    let context = Context::builder().build();
+
+    assert!(!context.index.is_output_spent(OutPoint::null()).unwrap());
+    assert!(!context
+      .index
+      .is_output_spent(Chain::Mainnet.genesis_coinbase_outpoint())
+      .unwrap());
+
+    context.mine_blocks(1);
+
+    assert!(!context
+      .index
+      .is_output_spent(OutPoint {
+        txid: context.core.tx(1, 0).txid(),
+        vout: 0,
+      })
+      .unwrap());
+
+    context.core.broadcast_tx(TransactionTemplate {
+      inputs: &[(1, 0, 0, Default::default())],
+      ..default()
+    });
+
+    context.mine_blocks(1);
+
+    assert!(context
+      .index
+      .is_output_spent(OutPoint {
+        txid: context.core.tx(1, 0).txid(),
+        vout: 0,
+      })
+      .unwrap());
+  }
+
+  #[test]
+  fn is_output_in_active_chain() {
+    let context = Context::builder().build();
+
+    assert!(context
+      .index
+      .is_output_in_active_chain(OutPoint::null())
+      .unwrap());
+
+    assert!(context
+      .index
+      .is_output_in_active_chain(Chain::Mainnet.genesis_coinbase_outpoint())
+      .unwrap());
+
+    context.mine_blocks(1);
+
+    assert!(context
+      .index
+      .is_output_in_active_chain(OutPoint {
+        txid: context.core.tx(1, 0).txid(),
+        vout: 0,
+      })
+      .unwrap());
+
+    assert!(!context
+      .index
+      .is_output_in_active_chain(OutPoint {
+        txid: context.core.tx(1, 0).txid(),
+        vout: 1,
+      })
+      .unwrap());
+
+    assert!(!context
+      .index
+      .is_output_in_active_chain(OutPoint {
+        txid: Txid::all_zeros(),
+        vout: 0,
+      })
+      .unwrap());
+  }
+
+  #[test]
+  fn fee_spent_inscriptions_are_numbered_last_in_block() {
+    for context in Context::configurations() {
+      context.mine_blocks(2);
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(1, 0, 0, inscription("text/plain", "hello").to_witness())],
+        fee: 50 * COIN_VALUE,
+        ..default()
+      });
+
+      let a = InscriptionId { txid, index: 0 };
+
+      let txid = context.core.broadcast_tx(TransactionTemplate {
+        inputs: &[(2, 0, 0, inscription("text/plain", "hello").to_witness())],
+        ..default()
+      });
+
+      let b = InscriptionId { txid, index: 0 };
+
+      context.mine_blocks(1);
+
+      assert_eq!(context.index.inscription_number(a), 1);
+      assert_eq!(context.index.inscription_number(b), 0);
+    }
+  }
+
+  #[test]
+  fn inscription_event_sender_channel() {
+    let (event_sender, mut event_receiver) = tokio::sync::mpsc::channel(1024);
+    let context = Context::builder().event_sender(event_sender).build();
+
+    context.mine_blocks(1);
+
+    let inscription = Inscription::default();
+    let create_txid = context.core.broadcast_tx(TransactionTemplate {
+      inputs: &[(1, 0, 0, inscription.to_witness())],
+      fee: 0,
+      outputs: 1,
+      ..default()
+    });
+
+    context.mine_blocks(1);
+
+    let inscription_id = InscriptionId {
+      txid: create_txid,
+      index: 0,
+    };
+    let create_event = event_receiver.blocking_recv().unwrap();
+    let expected_charms = if context.index.index_sats { 513 } else { 0 };
+    assert_eq!(
+      create_event,
+      Event::InscriptionCreated {
+        inscription_id,
+        location: Some(SatPoint {
+          outpoint: OutPoint {
+            txid: create_txid,
+            vout: 0
+          },
+          offset: 0
+        }),
+        sequence_number: 0,
+        block_height: 2,
+        charms: expected_charms,
+        parent_inscription_ids: Vec::new(),
+      }
+    );
+
+    // Transfer inscription
+    let transfer_txid = context.core.broadcast_tx(TransactionTemplate {
+      inputs: &[(2, 1, 0, Default::default())],
+      fee: 0,
+      outputs: 1,
+      ..default()
+    });
+
+    context.mine_blocks(1);
+
+    let transfer_event = event_receiver.blocking_recv().unwrap();
+    assert_eq!(
+      transfer_event,
+      Event::InscriptionTransferred {
+        block_height: 3,
+        inscription_id,
+        new_location: SatPoint {
+          outpoint: OutPoint {
+            txid: transfer_txid,
+            vout: 0
+          },
+          offset: 0
+        },
+        old_location: SatPoint {
+          outpoint: OutPoint {
+            txid: create_txid,
+            vout: 0
+          },
+          offset: 0
+        },
+        sequence_number: 0,
+      }
+    );
+  }
+
+  #[test]
+  fn rune_event_sender_channel() {
+    const RUNE: u128 = 99246114928149462;
+
+    let (event_sender, mut event_receiver) = tokio::sync::mpsc::channel(1024);
+    let context = Context::builder()
+      .arg("--index-runes")
+      .event_sender(event_sender)
+      .build();
+
+    let (txid0, id) = context.etch(
+      Runestone {
+        etching: Some(Etching {
+          rune: Some(Rune(RUNE)),
+          terms: Some(Terms {
+            amount: Some(1000),
+            cap: Some(100),
+            ..default()
+          }),
+          ..default()
+        }),
+        ..default()
+      },
+      1,
+    );
+
+    context.assert_runes(
+      [(
+        id,
+        RuneEntry {
+          block: id.block,
+          etching: txid0,
+          spaced_rune: SpacedRune {
+            rune: Rune(RUNE),
+            spacers: 0,
+          },
+          timestamp: id.block,
+          mints: 0,
+          terms: Some(Terms {
+            amount: Some(1000),
+            cap: Some(100),
+            ..default()
+          }),
+          ..default()
+        },
+      )],
+      [],
+    );
+
+    assert_eq!(
+      event_receiver.blocking_recv().unwrap(),
+      Event::RuneEtched {
+        block_height: 8,
+        txid: txid0,
+        rune_id: id,
+      }
+    );
+
+    let txid1 = context.core.broadcast_tx(TransactionTemplate {
+      inputs: &[(2, 0, 0, Witness::new())],
+      op_return: Some(
+        Runestone {
+          mint: Some(id),
+          ..default()
+        }
+        .encipher(),
+      ),
+      ..default()
+    });
+
+    context.mine_blocks(1);
+
+    context.assert_runes(
+      [(
+        id,
+        RuneEntry {
+          block: id.block,
+          etching: txid0,
+          terms: Some(Terms {
+            amount: Some(1000),
+            cap: Some(100),
+            ..default()
+          }),
+          mints: 1,
+          spaced_rune: SpacedRune {
+            rune: Rune(RUNE),
+            spacers: 0,
+          },
+          premine: 0,
+          timestamp: id.block,
+          ..default()
+        },
+      )],
+      [(
+        OutPoint {
+          txid: txid1,
+          vout: 0,
+        },
+        vec![(id, 1000)],
+      )],
+    );
+
+    assert_eq!(
+      event_receiver.blocking_recv().unwrap(),
+      Event::RuneMinted {
+        block_height: 9,
+        txid: txid1,
+        rune_id: id,
+        amount: 1000,
+      }
+    );
+
+    let txid2 = context.core.broadcast_tx(TransactionTemplate {
+      inputs: &[(9, 1, 0, Witness::new())],
+      op_return: Some(
+        Runestone {
+          edicts: vec![Edict {
+            id,
+            amount: 1000,
+            output: 0,
+          }],
+          ..Default::default()
+        }
+        .encipher(),
+      ),
+      ..Default::default()
+    });
+
+    context.mine_blocks(1);
+
+    context.assert_runes(
+      [(
+        id,
+        RuneEntry {
+          block: 8,
+          etching: txid0,
+          spaced_rune: SpacedRune {
+            rune: Rune(RUNE),
+            ..default()
+          },
+          terms: Some(Terms {
+            amount: Some(1000),
+            cap: Some(100),
+            ..Default::default()
+          }),
+          timestamp: 8,
+          mints: 1,
+          ..Default::default()
+        },
+      )],
+      [(
+        OutPoint {
+          txid: txid2,
+          vout: 0,
+        },
+        vec![(id, 1000)],
+      )],
+    );
+
+    event_receiver.blocking_recv().unwrap();
+
+    pretty_assert_eq!(
+      event_receiver.blocking_recv().unwrap(),
+      Event::RuneTransferred {
+        block_height: 10,
+        txid: txid2,
+        rune_id: id,
+        amount: 1000,
+        outpoint: OutPoint {
+          txid: txid2,
+          vout: 0,
+        },
+      }
+    );
+
+    let txid3 = context.core.broadcast_tx(TransactionTemplate {
+      inputs: &[(10, 1, 0, Witness::new())],
+      op_return: Some(
+        Runestone {
+          edicts: vec![Edict {
+            id,
+            amount: 111,
+            output: 0,
+          }],
+          ..Default::default()
+        }
+        .encipher(),
+      ),
+      op_return_index: Some(0),
+      ..Default::default()
+    });
+
+    context.mine_blocks(1);
+
+    context.assert_runes(
+      [(
+        id,
+        RuneEntry {
+          block: 8,
+          etching: txid0,
+          spaced_rune: SpacedRune {
+            rune: Rune(RUNE),
+            ..default()
+          },
+          terms: Some(Terms {
+            amount: Some(1000),
+            cap: Some(100),
+            ..Default::default()
+          }),
+          timestamp: 8,
+          mints: 1,
+          burned: 111,
+          ..Default::default()
+        },
+      )],
+      [(
+        OutPoint {
+          txid: txid3,
+          vout: 1,
+        },
+        vec![(id, 889)],
+      )],
+    );
+
+    event_receiver.blocking_recv().unwrap();
+
+    pretty_assert_eq!(
+      event_receiver.blocking_recv().unwrap(),
+      Event::RuneBurned {
+        block_height: 11,
+        txid: txid3,
+        amount: 111,
+        rune_id: id,
+      }
+    );
   }
 }

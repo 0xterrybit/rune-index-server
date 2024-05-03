@@ -99,7 +99,7 @@ impl Media {
     ("text/css",                    TEXT,    Code(Css),        &["css"]),
     ("text/html",                   TEXT,    Iframe,           &[]),
     ("text/html;charset=utf-8",     TEXT,    Iframe,           &["html"]),
-    ("text/javascript",             TEXT,    Code(JavaScript), &["js"]),
+    ("text/javascript",             TEXT,    Code(JavaScript), &["js", "mjs"]),
     ("text/markdown",               TEXT,    Markdown,         &[]),
     ("text/markdown;charset=utf-8", TEXT,    Markdown,         &["md"]),
     ("text/plain",                  TEXT,    Text,             &[]),
@@ -178,4 +178,55 @@ impl FromStr for Media {
     Err(anyhow!("unknown content type: {s}"))
   }
 }
- 
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn for_extension() {
+    assert_eq!(
+      Media::content_type_for_path(Path::new("pepe.jpg")).unwrap(),
+      ("image/jpeg", BrotliEncoderMode::BROTLI_MODE_GENERIC)
+    );
+    assert_eq!(
+      Media::content_type_for_path(Path::new("pepe.jpeg")).unwrap(),
+      ("image/jpeg", BrotliEncoderMode::BROTLI_MODE_GENERIC)
+    );
+    assert_eq!(
+      Media::content_type_for_path(Path::new("pepe.JPG")).unwrap(),
+      ("image/jpeg", BrotliEncoderMode::BROTLI_MODE_GENERIC)
+    );
+    assert_eq!(
+      Media::content_type_for_path(Path::new("pepe.txt")).unwrap(),
+      (
+        "text/plain;charset=utf-8",
+        BrotliEncoderMode::BROTLI_MODE_TEXT
+      )
+    );
+    assert_regex_match!(
+      Media::content_type_for_path(Path::new("pepe.foo")).unwrap_err(),
+      r"unsupported file extension `\.foo`, supported extensions: apng .*"
+    );
+  }
+
+  #[test]
+  fn h264_in_mp4_is_allowed() {
+    assert!(Media::check_mp4_codec(Path::new("examples/h264.mp4")).is_ok(),);
+  }
+
+  #[test]
+  fn av1_in_mp4_is_rejected() {
+    assert!(Media::check_mp4_codec(Path::new("examples/av1.mp4")).is_err(),);
+  }
+
+  #[test]
+  fn no_duplicate_extensions() {
+    let mut set = HashSet::new();
+    for (_, _, _, extensions) in Media::TABLE {
+      for extension in *extensions {
+        assert!(set.insert(extension), "duplicate extension `{extension}`");
+      }
+    }
+  }
+}

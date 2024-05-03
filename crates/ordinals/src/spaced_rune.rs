@@ -84,3 +84,76 @@ impl Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn display() {
+    assert_eq!("A.B".parse::<SpacedRune>().unwrap().to_string(), "A•B");
+    assert_eq!("A.B.C".parse::<SpacedRune>().unwrap().to_string(), "A•B•C");
+    assert_eq!(
+      SpacedRune {
+        rune: Rune(0),
+        spacers: 1
+      }
+      .to_string(),
+      "A"
+    );
+  }
+
+  #[test]
+  fn from_str() {
+    #[track_caller]
+    fn case(s: &str, rune: &str, spacers: u32) {
+      assert_eq!(
+        s.parse::<SpacedRune>().unwrap(),
+        SpacedRune {
+          rune: rune.parse().unwrap(),
+          spacers
+        },
+      );
+    }
+
+    assert_eq!(
+      ".A".parse::<SpacedRune>().unwrap_err(),
+      Error::LeadingSpacer,
+    );
+
+    assert_eq!(
+      "A..B".parse::<SpacedRune>().unwrap_err(),
+      Error::DoubleSpacer,
+    );
+
+    assert_eq!(
+      "A.".parse::<SpacedRune>().unwrap_err(),
+      Error::TrailingSpacer,
+    );
+
+    assert_eq!(
+      "Ax".parse::<SpacedRune>().unwrap_err(),
+      Error::Character('x')
+    );
+
+    case("A.B", "AB", 0b1);
+    case("A.B.C", "ABC", 0b11);
+    case("A•B", "AB", 0b1);
+    case("A•B•C", "ABC", 0b11);
+    case("A•BC", "ABC", 0b1);
+  }
+
+  #[test]
+  fn serde() {
+    let spaced_rune = SpacedRune {
+      rune: Rune(26),
+      spacers: 1,
+    };
+    let json = "\"A•A\"";
+    assert_eq!(serde_json::to_string(&spaced_rune).unwrap(), json);
+    assert_eq!(
+      serde_json::from_str::<SpacedRune>(json).unwrap(),
+      spaced_rune
+    );
+  }
+}

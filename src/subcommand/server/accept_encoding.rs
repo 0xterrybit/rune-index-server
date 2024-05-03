@@ -24,7 +24,6 @@ where
   }
 }
 
-
 impl AcceptEncoding {
   pub(crate) fn is_acceptable(&self, encoding: &HeaderValue) -> bool {
     let Ok(encoding) = encoding.to_str() else {

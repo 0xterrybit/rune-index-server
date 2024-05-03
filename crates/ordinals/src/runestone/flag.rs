@@ -29,4 +29,31 @@ impl From<Flag> for u128 {
   }
 }
 
+#[cfg(test)]
+mod tests {
+  use super::*;
 
+  #[test]
+  fn mask() {
+    assert_eq!(Flag::Etching.mask(), 0b1);
+    assert_eq!(Flag::Cenotaph.mask(), 1 << 127);
+  }
+
+  #[test]
+  fn take() {
+    let mut flags = 1;
+    assert!(Flag::Etching.take(&mut flags));
+    assert_eq!(flags, 0);
+
+    let mut flags = 0;
+    assert!(!Flag::Etching.take(&mut flags));
+    assert_eq!(flags, 0);
+  }
+
+  #[test]
+  fn set() {
+    let mut flags = 0;
+    Flag::Etching.set(&mut flags);
+    assert_eq!(flags, 1);
+  }
+}

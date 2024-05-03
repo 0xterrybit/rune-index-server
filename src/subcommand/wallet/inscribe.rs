@@ -118,4 +118,95 @@ impl Inscribe {
       Ok(None)
     }
   }
-} 
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn cbor_and_json_metadata_flags_conflict() {
+    assert_regex_match!(
+      Arguments::try_parse_from([
+        "ord",
+        "wallet",
+        "inscribe",
+        "--cbor-metadata",
+        "foo",
+        "--json-metadata",
+        "bar",
+        "--file",
+        "baz",
+      ])
+      .unwrap_err()
+      .to_string(),
+      ".*--cbor-metadata.*cannot be used with.*--json-metadata.*"
+    );
+  }
+
+  #[test]
+  fn satpoint_and_sat_flags_conflict() {
+    assert_regex_match!(
+      Arguments::try_parse_from([
+        "ord",
+        "--index-sats",
+        "wallet",
+        "inscribe",
+        "--sat",
+        "50000000000",
+        "--satpoint",
+        "038112028c55f3f77cc0b8b413df51f70675f66be443212da0642b7636f68a00:1:0",
+        "--file",
+        "baz",
+      ])
+      .unwrap_err()
+      .to_string(),
+      ".*--sat.*cannot be used with.*--satpoint.*"
+    );
+  }
+
+  #[test]
+  fn delegate_or_file_must_be_set() {
+    assert_regex_match!(
+      Arguments::try_parse_from(["ord", "wallet", "inscribe", "--fee-rate", "1"])
+        .unwrap_err()
+        .to_string(),
+      r".*required arguments.*--delegate <DELEGATE>\|--file <FILE>.*"
+    );
+
+    assert!(Arguments::try_parse_from([
+      "ord",
+      "wallet",
+      "inscribe",
+      "--file",
+      "hello.txt",
+      "--fee-rate",
+      "1"
+    ])
+    .is_ok());
+
+    assert!(Arguments::try_parse_from([
+      "ord",
+      "wallet",
+      "inscribe",
+      "--delegate",
+      "038112028c55f3f77cc0b8b413df51f70675f66be443212da0642b7636f68a00i0",
+      "--fee-rate",
+      "1"
+    ])
+    .is_ok());
+
+    assert!(Arguments::try_parse_from([
+      "ord",
+      "wallet",
+      "inscribe",
+      "--file",
+      "hello.txt",
+      "--delegate",
+      "038112028c55f3f77cc0b8b413df51f70675f66be443212da0642b7636f68a00i0",
+      "--fee-rate",
+      "1"
+    ])
+    .is_ok());
+  }
+}

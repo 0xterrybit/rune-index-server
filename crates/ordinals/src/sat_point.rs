@@ -84,4 +84,75 @@ pub enum Error {
     err: ParseOutPointError,
   },
 }
- 
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn error() {
+    assert_eq!(
+      "foo".parse::<SatPoint>().unwrap_err().to_string(),
+      "satpoint `foo` missing colon"
+    );
+
+    assert_eq!(
+      "foo:bar".parse::<SatPoint>().unwrap_err().to_string(),
+      "satpoint outpoint `foo` invalid: OutPoint not in <txid>:<vout> format"
+    );
+
+    assert_eq!(
+      "1111111111111111111111111111111111111111111111111111111111111111:1:bar"
+        .parse::<SatPoint>()
+        .unwrap_err()
+        .to_string(),
+      "satpoint offset `bar` invalid: invalid digit found in string"
+    );
+  }
+
+  #[test]
+  fn from_str_ok() {
+    assert_eq!(
+      "1111111111111111111111111111111111111111111111111111111111111111:1:1"
+        .parse::<SatPoint>()
+        .unwrap(),
+      SatPoint {
+        outpoint: "1111111111111111111111111111111111111111111111111111111111111111:1"
+          .parse()
+          .unwrap(),
+        offset: 1,
+      }
+    );
+  }
+
+  #[test]
+  fn from_str_err() {
+    "abc".parse::<SatPoint>().unwrap_err();
+
+    "abc:xyz".parse::<SatPoint>().unwrap_err();
+
+    "1111111111111111111111111111111111111111111111111111111111111111:1"
+      .parse::<SatPoint>()
+      .unwrap_err();
+
+    "1111111111111111111111111111111111111111111111111111111111111111:1:foo"
+      .parse::<SatPoint>()
+      .unwrap_err();
+  }
+
+  #[test]
+  fn deserialize_ok() {
+    assert_eq!(
+      serde_json::from_str::<SatPoint>(
+        "\"1111111111111111111111111111111111111111111111111111111111111111:1:1\""
+      )
+      .unwrap(),
+      SatPoint {
+        outpoint: "1111111111111111111111111111111111111111111111111111111111111111:1"
+          .parse()
+          .unwrap(),
+        offset: 1,
+      }
+    );
+  }
+}

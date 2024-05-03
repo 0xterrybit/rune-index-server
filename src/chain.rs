@@ -122,3 +122,20 @@ impl FromStr for Chain {
     }
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn from_str() {
+    assert_eq!("mainnet".parse::<Chain>().unwrap(), Chain::Mainnet);
+    assert_eq!("regtest".parse::<Chain>().unwrap(), Chain::Regtest);
+    assert_eq!("signet".parse::<Chain>().unwrap(), Chain::Signet);
+    assert_eq!("testnet".parse::<Chain>().unwrap(), Chain::Testnet);
+    assert_eq!(
+      "foo".parse::<Chain>().unwrap_err().to_string(),
+      "invalid chain `foo`"
+    );
+  }
+}

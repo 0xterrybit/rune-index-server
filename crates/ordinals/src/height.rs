@@ -46,3 +46,77 @@ impl PartialEq<u32> for Height {
   }
 }
 
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn n() {
+    assert_eq!(Height(0).n(), 0);
+    assert_eq!(Height(1).n(), 1);
+  }
+
+  #[test]
+  fn add() {
+    assert_eq!(Height(0) + 1, 1);
+    assert_eq!(Height(1) + 100, 101);
+  }
+
+  #[test]
+  fn sub() {
+    assert_eq!(Height(1) - 1, 0);
+    assert_eq!(Height(100) - 50, 50);
+  }
+
+  #[test]
+  fn eq() {
+    assert_eq!(Height(0), 0);
+    assert_eq!(Height(100), 100);
+  }
+
+  #[test]
+  fn from_str() {
+    assert_eq!("0".parse::<Height>().unwrap(), 0);
+    assert!("foo".parse::<Height>().is_err());
+  }
+
+  #[test]
+  fn subsidy() {
+    assert_eq!(Height(0).subsidy(), 5000000000);
+    assert_eq!(Height(1).subsidy(), 5000000000);
+    assert_eq!(Height(SUBSIDY_HALVING_INTERVAL - 1).subsidy(), 5000000000);
+    assert_eq!(Height(SUBSIDY_HALVING_INTERVAL).subsidy(), 2500000000);
+    assert_eq!(Height(SUBSIDY_HALVING_INTERVAL + 1).subsidy(), 2500000000);
+  }
+
+  #[test]
+  fn starting_sat() {
+    assert_eq!(Height(0).starting_sat(), 0);
+    assert_eq!(Height(1).starting_sat(), 5000000000);
+    assert_eq!(
+      Height(SUBSIDY_HALVING_INTERVAL - 1).starting_sat(),
+      (u64::from(SUBSIDY_HALVING_INTERVAL) - 1) * 5000000000
+    );
+    assert_eq!(
+      Height(SUBSIDY_HALVING_INTERVAL).starting_sat(),
+      u64::from(SUBSIDY_HALVING_INTERVAL) * 5000000000
+    );
+    assert_eq!(
+      Height(SUBSIDY_HALVING_INTERVAL + 1).starting_sat(),
+      u64::from(SUBSIDY_HALVING_INTERVAL) * 5000000000 + 2500000000
+    );
+    assert_eq!(
+      Height(u32::MAX).starting_sat(),
+      *Epoch::STARTING_SATS.last().unwrap()
+    );
+  }
+
+  #[test]
+  fn period_offset() {
+    assert_eq!(Height(0).period_offset(), 0);
+    assert_eq!(Height(1).period_offset(), 1);
+    assert_eq!(Height(DIFFCHANGE_INTERVAL - 1).period_offset(), 2015);
+    assert_eq!(Height(DIFFCHANGE_INTERVAL).period_offset(), 0);
+    assert_eq!(Height(DIFFCHANGE_INTERVAL + 1).period_offset(), 1);
+  }
+}

@@ -7,3 +7,13 @@ impl IntoUsize for u32 {
     self.try_into().unwrap()
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn into_usize() {
+    u32::MAX.into_usize();
+  }
+}

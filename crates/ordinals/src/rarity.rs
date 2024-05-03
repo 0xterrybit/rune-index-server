@@ -89,4 +89,91 @@ impl FromStr for Rarity {
     }
   }
 }
- 
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn rarity() {
+    assert_eq!(Sat(0).rarity(), Rarity::Mythic);
+    assert_eq!(Sat(1).rarity(), Rarity::Common);
+
+    assert_eq!(Sat(50 * COIN_VALUE - 1).rarity(), Rarity::Common);
+    assert_eq!(Sat(50 * COIN_VALUE).rarity(), Rarity::Uncommon);
+    assert_eq!(Sat(50 * COIN_VALUE + 1).rarity(), Rarity::Common);
+
+    assert_eq!(
+      Sat(50 * COIN_VALUE * u64::from(DIFFCHANGE_INTERVAL) - 1).rarity(),
+      Rarity::Common
+    );
+    assert_eq!(
+      Sat(50 * COIN_VALUE * u64::from(DIFFCHANGE_INTERVAL)).rarity(),
+      Rarity::Rare
+    );
+    assert_eq!(
+      Sat(50 * COIN_VALUE * u64::from(DIFFCHANGE_INTERVAL) + 1).rarity(),
+      Rarity::Common
+    );
+
+    assert_eq!(
+      Sat(50 * COIN_VALUE * u64::from(SUBSIDY_HALVING_INTERVAL) - 1).rarity(),
+      Rarity::Common
+    );
+    assert_eq!(
+      Sat(50 * COIN_VALUE * u64::from(SUBSIDY_HALVING_INTERVAL)).rarity(),
+      Rarity::Epic
+    );
+    assert_eq!(
+      Sat(50 * COIN_VALUE * u64::from(SUBSIDY_HALVING_INTERVAL) + 1).rarity(),
+      Rarity::Common
+    );
+
+    assert_eq!(Sat(2067187500000000 - 1).rarity(), Rarity::Common);
+    assert_eq!(Sat(2067187500000000).rarity(), Rarity::Legendary);
+    assert_eq!(Sat(2067187500000000 + 1).rarity(), Rarity::Common);
+  }
+
+  #[test]
+  fn from_str_and_deserialize_ok() {
+    #[track_caller]
+    fn case(s: &str, expected: Rarity) {
+      let actual = s.parse::<Rarity>().unwrap();
+      assert_eq!(actual, expected);
+      let round_trip = actual.to_string().parse::<Rarity>().unwrap();
+      assert_eq!(round_trip, expected);
+      let serialized = serde_json::to_string(&expected).unwrap();
+      assert!(serde_json::from_str::<Rarity>(&serialized).is_ok());
+    }
+
+    case("common", Rarity::Common);
+    case("uncommon", Rarity::Uncommon);
+    case("rare", Rarity::Rare);
+    case("epic", Rarity::Epic);
+    case("legendary", Rarity::Legendary);
+    case("mythic", Rarity::Mythic);
+  }
+
+  #[test]
+  fn conversions_with_u8() {
+    for &expected in &[
+      Rarity::Common,
+      Rarity::Uncommon,
+      Rarity::Rare,
+      Rarity::Epic,
+      Rarity::Legendary,
+      Rarity::Mythic,
+    ] {
+      let n: u8 = expected.into();
+      let actual = Rarity::try_from(n).unwrap();
+      assert_eq!(actual, expected);
+    }
+
+    assert_eq!(Rarity::try_from(6), Err(6));
+  }
+
+  #[test]
+  fn error() {
+    assert_eq!("foo".parse::<Rarity>().unwrap_err(), "invalid rarity `foo`");
+  }
+}

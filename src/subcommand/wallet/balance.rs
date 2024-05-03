@@ -26,7 +26,7 @@ pub(crate) fn run(wallet: Wallet) -> SubcommandResult {
   let mut runic = 0;
 
   for (output, txout) in unspent_outputs {
-    let rune_balances = wallet.get_runes_balances_for_output(output)?;
+    let rune_balances = wallet.get_runes_balances_in_output(output)?;
 
     let is_ordinal = inscription_outputs.contains(output);
     let is_runic = !rune_balances.is_empty();
@@ -67,4 +67,24 @@ pub(crate) fn run(wallet: Wallet) -> SubcommandResult {
     runic: wallet.has_rune_index().then_some(runic),
     total: cardinal + ordinal + runic,
   })))
-} 
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn runes_and_runic_fields_are_not_present_if_none() {
+    assert_eq!(
+      serde_json::to_string(&Output {
+        cardinal: 0,
+        ordinal: 0,
+        runes: None,
+        runic: None,
+        total: 0
+      })
+      .unwrap(),
+      r#"{"cardinal":0,"ordinal":0,"total":0}"#
+    );
+  }
+}

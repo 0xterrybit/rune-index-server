@@ -146,3 +146,97 @@ impl From<Height> for Epoch {
     Self(height.0 / SUBSIDY_HALVING_INTERVAL)
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::super::*;
+
+  #[test]
+  fn starting_sat() {
+    assert_eq!(Epoch(0).starting_sat(), 0);
+    assert_eq!(
+      Epoch(1).starting_sat(),
+      Epoch(0).subsidy() * u64::from(SUBSIDY_HALVING_INTERVAL)
+    );
+    assert_eq!(
+      Epoch(2).starting_sat(),
+      (Epoch(0).subsidy() + Epoch(1).subsidy()) * u64::from(SUBSIDY_HALVING_INTERVAL)
+    );
+    assert_eq!(Epoch(33).starting_sat(), Sat(Sat::SUPPLY));
+    assert_eq!(Epoch(34).starting_sat(), Sat(Sat::SUPPLY));
+  }
+
+  #[test]
+  fn starting_sats() {
+    let mut sat = 0;
+
+    let mut epoch_sats = Vec::new();
+
+    for epoch in 0..34 {
+      epoch_sats.push(sat);
+      sat += u64::from(SUBSIDY_HALVING_INTERVAL) * Epoch(epoch).subsidy();
+    }
+
+    assert_eq!(Epoch::STARTING_SATS.as_slice(), epoch_sats);
+    assert_eq!(Epoch::STARTING_SATS.len(), 34);
+  }
+
+  #[test]
+  fn subsidy() {
+    assert_eq!(Epoch(0).subsidy(), 5000000000);
+    assert_eq!(Epoch(1).subsidy(), 2500000000);
+    assert_eq!(Epoch(32).subsidy(), 1);
+    assert_eq!(Epoch(33).subsidy(), 0);
+  }
+
+  #[test]
+  fn starting_height() {
+    assert_eq!(Epoch(0).starting_height(), 0);
+    assert_eq!(Epoch(1).starting_height(), SUBSIDY_HALVING_INTERVAL);
+    assert_eq!(Epoch(2).starting_height(), SUBSIDY_HALVING_INTERVAL * 2);
+  }
+
+  #[test]
+  fn from_height() {
+    assert_eq!(Epoch::from(Height(0)), 0);
+    assert_eq!(Epoch::from(Height(SUBSIDY_HALVING_INTERVAL)), 1);
+    assert_eq!(Epoch::from(Height(SUBSIDY_HALVING_INTERVAL) + 1), 1);
+  }
+
+  #[test]
+  fn from_sat() {
+    for (epoch, starting_sat) in Epoch::STARTING_SATS.into_iter().enumerate() {
+      if epoch > 0 {
+        assert_eq!(
+          Epoch::from(Sat(starting_sat.n() - 1)),
+          Epoch(u32::try_from(epoch).unwrap() - 1)
+        );
+      }
+      assert_eq!(
+        Epoch::from(starting_sat),
+        Epoch(u32::try_from(epoch).unwrap())
+      );
+      assert_eq!(
+        Epoch::from(starting_sat + 1),
+        Epoch(u32::try_from(epoch).unwrap())
+      );
+    }
+    assert_eq!(Epoch::from(Sat(0)), 0);
+    assert_eq!(Epoch::from(Sat(1)), 0);
+    assert_eq!(Epoch::from(Epoch(1).starting_sat()), 1);
+    assert_eq!(Epoch::from(Epoch(1).starting_sat() + 1), 1);
+    assert_eq!(Epoch::from(Sat(u64::MAX)), 33);
+  }
+
+  #[test]
+  fn eq() {
+    assert_eq!(Epoch(0), 0);
+    assert_eq!(Epoch(100), 100);
+  }
+
+  #[test]
+  fn first_post_subsidy() {
+    assert_eq!(Epoch::FIRST_POST_SUBSIDY.subsidy(), 0);
+    assert!(Epoch(Epoch::FIRST_POST_SUBSIDY.0 - 1).subsidy() > 0);
+  }
+}

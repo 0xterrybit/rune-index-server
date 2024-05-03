@@ -307,4 +307,604 @@ impl Inscription {
       || matches!(self.media(), Media::Code(_) | Media::Text | Media::Unknown)
   }
 }
- 
+
+#[cfg(test)]
+mod tests {
+  use {super::*, std::io::Write};
+
+  #[test]
+  fn reveal_script_chunks_body() {
+    assert_eq!(
+      inscription("foo", [])
+        .append_reveal_script(script::Builder::new())
+        .instructions()
+        .count(),
+      7
+    );
+
+    assert_eq!(
+      inscription("foo", [0; 1])
+        .append_reveal_script(script::Builder::new())
+        .instructions()
+        .count(),
+      8
+    );
+
+    assert_eq!(
+      inscription("foo", [0; 520])
+        .append_reveal_script(script::Builder::new())
+        .instructions()
+        .count(),
+      8
+    );
+
+    assert_eq!(
+      inscription("foo", [0; 521])
+        .append_reveal_script(script::Builder::new())
+        .instructions()
+        .count(),
+      9
+    );
+
+    assert_eq!(
+      inscription("foo", [0; 1040])
+        .append_reveal_script(script::Builder::new())
+        .instructions()
+        .count(),
+      9
+    );
+
+    assert_eq!(
+      inscription("foo", [0; 1041])
+        .append_reveal_script(script::Builder::new())
+        .instructions()
+        .count(),
+      10
+    );
+  }
+
+  #[test]
+  fn reveal_script_chunks_metadata() {
+    assert_eq!(
+      Inscription {
+        metadata: None,
+        ..default()
+      }
+      .append_reveal_script(script::Builder::new())
+      .instructions()
+      .count(),
+      4
+    );
+
+    assert_eq!(
+      Inscription {
+        metadata: Some(Vec::new()),
+        ..default()
+      }
+      .append_reveal_script(script::Builder::new())
+      .instructions()
+      .count(),
+      4
+    );
+
+    assert_eq!(
+      Inscription {
+        metadata: Some(vec![0; 1]),
+        ..default()
+      }
+      .append_reveal_script(script::Builder::new())
+      .instructions()
+      .count(),
+      6
+    );
+
+    assert_eq!(
+      Inscription {
+        metadata: Some(vec![0; 520]),
+        ..default()
+      }
+      .append_reveal_script(script::Builder::new())
+      .instructions()
+      .count(),
+      6
+    );
+
+    assert_eq!(
+      Inscription {
+        metadata: Some(vec![0; 521]),
+        ..default()
+      }
+      .append_reveal_script(script::Builder::new())
+      .instructions()
+      .count(),
+      8
+    );
+  }
+
+  #[test]
+  fn inscription_with_no_parent_field_has_no_parent() {
+    assert!(Inscription {
+      parents: Vec::new(),
+      ..default()
+    }
+    .parents()
+    .is_empty());
+  }
+
+  #[test]
+  fn inscription_with_parent_field_shorter_than_txid_length_has_no_parent() {
+    assert!(Inscription {
+      parents: vec![Vec::new()],
+      ..default()
+    }
+    .parents()
+    .is_empty());
+  }
+
+  #[test]
+  fn inscription_with_parent_field_longer_than_txid_and_index_has_no_parent() {
+    assert!(Inscription {
+      parents: vec![vec![1; 37]],
+      ..default()
+    }
+    .parents()
+    .is_empty());
+  }
+
+  #[test]
+  fn inscription_with_parent_field_index_with_trailing_zeroes_and_fixed_length_has_parent() {
+    let mut parent = vec![1; 36];
+
+    parent[35] = 0;
+
+    assert!(!Inscription {
+      parents: vec![parent],
+      ..default()
+    }
+    .parents()
+    .is_empty());
+  }
+
+  #[test]
+  fn inscription_with_parent_field_index_with_trailing_zeroes_and_variable_length_has_no_parent() {
+    let mut parent = vec![1; 35];
+
+    parent[34] = 0;
+
+    assert!(Inscription {
+      parents: vec![parent],
+      ..default()
+    }
+    .parents()
+    .is_empty());
+  }
+
+  #[test]
+  fn inscription_delegate_txid_is_deserialized_correctly() {
+    assert_eq!(
+      Inscription {
+        delegate: Some(vec![
+          0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+          0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+          0x1e, 0x1f,
+        ]),
+        ..default()
+      }
+      .delegate()
+      .unwrap()
+      .txid,
+      "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100"
+        .parse()
+        .unwrap()
+    );
+  }
+
+  #[test]
+  fn inscription_parent_txid_is_deserialized_correctly() {
+    assert_eq!(
+      Inscription {
+        parents: vec![vec![
+          0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+          0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+          0x1e, 0x1f,
+        ]],
+        ..default()
+      }
+      .parents(),
+      [
+        "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100i0"
+          .parse()
+          .unwrap()
+      ],
+    );
+  }
+
+  #[test]
+  fn inscription_parent_with_zero_byte_index_field_is_deserialized_correctly() {
+    assert_eq!(
+      Inscription {
+        parents: vec![vec![1; 32]],
+        ..default()
+      }
+      .parents(),
+      [
+        "0101010101010101010101010101010101010101010101010101010101010101i0"
+          .parse()
+          .unwrap()
+      ],
+    );
+  }
+
+  #[test]
+  fn inscription_parent_with_one_byte_index_field_is_deserialized_correctly() {
+    assert_eq!(
+      Inscription {
+        parents: vec![vec![
+          0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+          0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+          0xff, 0xff, 0x01
+        ]],
+        ..default()
+      }
+      .parents(),
+      [
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffi1"
+          .parse()
+          .unwrap()
+      ],
+    );
+  }
+
+  #[test]
+  fn inscription_parent_with_two_byte_index_field_is_deserialized_correctly() {
+    assert_eq!(
+      Inscription {
+        parents: vec![vec![
+          0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+          0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+          0xff, 0xff, 0x01, 0x02
+        ]],
+        ..default()
+      }
+      .parents(),
+      [
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffi513"
+          .parse()
+          .unwrap()
+      ],
+    );
+  }
+
+  #[test]
+  fn inscription_parent_with_three_byte_index_field_is_deserialized_correctly() {
+    assert_eq!(
+      Inscription {
+        parents: vec![vec![
+          0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+          0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+          0xff, 0xff, 0x01, 0x02, 0x03
+        ]],
+        ..default()
+      }
+      .parents(),
+      [
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffi197121"
+          .parse()
+          .unwrap()
+      ],
+    );
+  }
+
+  #[test]
+  fn inscription_parent_with_four_byte_index_field_is_deserialized_correctly() {
+    assert_eq!(
+      Inscription {
+        parents: vec![vec![
+          0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+          0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+          0xff, 0xff, 0x01, 0x02, 0x03, 0x04,
+        ]],
+        ..default()
+      }
+      .parents(),
+      [
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffi67305985"
+          .parse()
+          .unwrap()
+      ],
+    );
+  }
+
+  #[test]
+  fn inscription_parent_returns_multiple_parents() {
+    assert_eq!(
+      Inscription {
+        parents: vec![
+          vec![
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0x01, 0x02, 0x03, 0x04,
+          ],
+          vec![
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0x00, 0x02, 0x03, 0x04,
+          ]
+        ],
+        ..default()
+      }
+      .parents(),
+      [
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffi67305985"
+          .parse()
+          .unwrap(),
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffi67305984"
+          .parse()
+          .unwrap()
+      ],
+    );
+  }
+
+  #[test]
+  fn metadata_function_decodes_metadata() {
+    assert_eq!(
+      Inscription {
+        metadata: Some(vec![0x44, 0, 1, 2, 3]),
+        ..default()
+      }
+      .metadata()
+      .unwrap(),
+      Value::Bytes(vec![0, 1, 2, 3]),
+    );
+  }
+
+  #[test]
+  fn metadata_function_returns_none_if_no_metadata() {
+    assert_eq!(
+      Inscription {
+        metadata: None,
+        ..default()
+      }
+      .metadata(),
+      None,
+    );
+  }
+
+  #[test]
+  fn metadata_function_returns_none_if_metadata_fails_to_parse() {
+    assert_eq!(
+      Inscription {
+        metadata: Some(vec![0x44]),
+        ..default()
+      }
+      .metadata(),
+      None,
+    );
+  }
+
+  #[test]
+  fn pointer_decode() {
+    assert_eq!(
+      Inscription {
+        pointer: None,
+        ..default()
+      }
+      .pointer(),
+      None
+    );
+    assert_eq!(
+      Inscription {
+        pointer: Some(vec![0]),
+        ..default()
+      }
+      .pointer(),
+      Some(0),
+    );
+    assert_eq!(
+      Inscription {
+        pointer: Some(vec![1, 2, 3, 4, 5, 6, 7, 8]),
+        ..default()
+      }
+      .pointer(),
+      Some(0x0807060504030201),
+    );
+    assert_eq!(
+      Inscription {
+        pointer: Some(vec![1, 2, 3, 4, 5, 6]),
+        ..default()
+      }
+      .pointer(),
+      Some(0x0000060504030201),
+    );
+    assert_eq!(
+      Inscription {
+        pointer: Some(vec![1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 0]),
+        ..default()
+      }
+      .pointer(),
+      Some(0x0807060504030201),
+    );
+    assert_eq!(
+      Inscription {
+        pointer: Some(vec![1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 1]),
+        ..default()
+      }
+      .pointer(),
+      None,
+    );
+    assert_eq!(
+      Inscription {
+        pointer: Some(vec![1, 2, 3, 4, 5, 6, 7, 8, 1]),
+        ..default()
+      }
+      .pointer(),
+      None,
+    );
+  }
+
+  #[test]
+  fn pointer_encode() {
+    assert_eq!(
+      Inscription {
+        pointer: None,
+        ..default()
+      }
+      .to_witness(),
+      envelope(&[b"ord"]),
+    );
+
+    assert_eq!(
+      Inscription {
+        pointer: Some(vec![1, 2, 3]),
+        ..default()
+      }
+      .to_witness(),
+      envelope(&[b"ord", &[2], &[1, 2, 3]]),
+    );
+  }
+
+  #[test]
+  fn pointer_value() {
+    let mut file = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+
+    write!(file, "foo").unwrap();
+
+    let inscription = Inscription::new(
+      Chain::Mainnet,
+      false,
+      None,
+      None,
+      None,
+      Vec::new(),
+      Some(file.path().to_path_buf()),
+      None,
+      None,
+    )
+    .unwrap();
+
+    assert_eq!(inscription.pointer, None);
+
+    let inscription = Inscription::new(
+      Chain::Mainnet,
+      false,
+      None,
+      None,
+      None,
+      Vec::new(),
+      Some(file.path().to_path_buf()),
+      Some(0),
+      None,
+    )
+    .unwrap();
+
+    assert_eq!(inscription.pointer, Some(Vec::new()));
+
+    let inscription = Inscription::new(
+      Chain::Mainnet,
+      false,
+      None,
+      None,
+      None,
+      Vec::new(),
+      Some(file.path().to_path_buf()),
+      Some(1),
+      None,
+    )
+    .unwrap();
+
+    assert_eq!(inscription.pointer, Some(vec![1]));
+
+    let inscription = Inscription::new(
+      Chain::Mainnet,
+      false,
+      None,
+      None,
+      None,
+      Vec::new(),
+      Some(file.path().to_path_buf()),
+      Some(256),
+      None,
+    )
+    .unwrap();
+
+    assert_eq!(inscription.pointer, Some(vec![0, 1]));
+  }
+
+  #[test]
+  fn hidden() {
+    #[track_caller]
+    fn case(content_type: Option<&str>, body: Option<&str>, expected: bool) {
+      assert_eq!(
+        Inscription {
+          content_type: content_type.map(|content_type| content_type.as_bytes().into()),
+          body: body.map(|content_type| content_type.as_bytes().into()),
+          ..default()
+        }
+        .hidden(),
+        expected
+      );
+    }
+
+    case(None, None, true);
+    case(Some("foo"), Some(""), true);
+    case(Some("text/plain"), None, true);
+    case(
+      Some("text/plain"),
+      Some("The fox jumped. The cow danced."),
+      true,
+    );
+    case(Some("text/plain;charset=utf-8"), Some("foo"), true);
+    case(Some("text/plain;charset=cn-big5"), Some("foo"), true);
+    case(Some("application/json"), Some("foo"), true);
+    case(
+      Some("text/markdown"),
+      Some("/content/09a8d837ec0bcaec668ecf405e696a16bee5990863659c224ff888fb6f8f45e7i0"),
+      true,
+    );
+    case(
+      Some("text/html"),
+      Some("/content/09a8d837ec0bcaec668ecf405e696a16bee5990863659c224ff888fb6f8f45e7i0"),
+      true,
+    );
+    case(Some("application/yaml"), Some(""), true);
+    case(
+      Some("text/html;charset=utf-8"),
+      Some("/content/09a8d837ec0bcaec668ecf405e696a16bee5990863659c224ff888fb6f8f45e7i0"),
+      true,
+    );
+    case(
+      Some("text/html"),
+      Some("  /content/09a8d837ec0bcaec668ecf405e696a16bee5990863659c224ff888fb6f8f45e7i0  \n"),
+      true,
+    );
+    case(
+      Some("text/html"),
+      Some(
+        r#"<body style="background:#F61;color:#fff;"><h1 style="height:100%">bvm.network</h1></body>"#,
+      ),
+      true,
+    );
+    case(
+      Some("text/html"),
+      Some(
+        r#"<body style="background:#F61;color:#fff;"><h1 style="height:100%">bvm.network</h1></body>foo"#,
+      ),
+      true,
+    );
+
+    assert!(Inscription {
+      content_type: Some("text/plain".as_bytes().into()),
+      body: Some(b"{\xc3\x28}".as_slice().into()),
+      ..default()
+    }
+    .hidden());
+
+    assert!(Inscription {
+      content_type: Some("text/html".as_bytes().into()),
+      body: Some("hello".as_bytes().into()),
+      metaprotocol: Some(Vec::new()),
+      ..default()
+    }
+    .hidden());
+  }
+}
