@@ -334,7 +334,7 @@ inscriptions:
   #[test]
   fn batchfile_no_duplicate_satpoints() {
 
-    let batch_file = PathBuf::from("/Users/gaomin/workspace/runes-indexer/batch1.yaml");
+    let batch_file = PathBuf::from("/Users/gaomin/workspace/runes-indexer/batch.yaml");
 
     fs::write(
       batch_file.clone(),
@@ -453,7 +453,7 @@ inscriptions:
   fn batchfile_no_delegate_no_file_allowed() {
     // let tempdir = TempDir::new().unwrap();
     // let batch_file = tempdir.path().join("batch.yaml");
-    let batch_file = PathBuf::from("/Users/gaomin/workspace/runes-indexer/batch1.yaml");
+    let batch_file = PathBuf::from("/Users/gaomin/workspace/runes-indexer/batch.yaml");
 
     println!("Path: {:?}", batch_file.as_path());
 

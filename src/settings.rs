@@ -1153,5 +1153,6 @@ mod tests {
       Settings::merge(options, env).unwrap().index,
       Some("option".into()),
     );
+    
   }
 }

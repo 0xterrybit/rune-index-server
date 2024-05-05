@@ -17,6 +17,9 @@ create INPUT_TXID INPUT_VOUT OUTPUT_DESTINATION OUTPUT_AMOUNT:
     ]' \
     > raw.hex
 
+
+
+
 sign WALLET_NAME:
   bitcoin-cli -rpcwallet={{WALLET_NAME}} signrawtransactionwithwallet `cat raw.hex` > signed.json
 

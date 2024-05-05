@@ -1,0 +1,20 @@
+bitcoin_rpc_url: http://34.143.248.156:3389
+bitcoin_rpc_username: bitcoin
+bitcoin_rpc_password: bitcoin
+
+chain: testnet
+# commit_interval: 10000
+config: /Users/gaomin/workspace/runes-indexer/.ord/ord.yaml
+config_dir: /Users/gaomin/workspace/runes-indexer/.ord
+data_dir: /Users/gaomin/workspace/runes-indexer/.ord
+index: /Users/gaomin/workspace/runes-indexer/.ord/index.redb
+
+# first_inscription_height: 100
+height_limit: 5000
+# index_cache_size: 1000000000
+index_runes: true
+# index_sats: true
+# index_spent_sats: true
+# index_transactions: true
+# integration_test: false
+# no_index_inscriptions: true
