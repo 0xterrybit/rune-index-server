@@ -395,6 +395,7 @@ fn batch(core: &mockcore::Handle, ord: &TestServer, batchfile: batch::File) -> E
 }
 
 fn envelope(payload: &[&[u8]]) -> Witness {
+  
   let mut builder = bitcoin::script::Builder::new()
     .push_opcode(bitcoin::opcodes::OP_FALSE)
     .push_opcode(bitcoin::opcodes::all::OP_IF);

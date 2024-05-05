@@ -42,6 +42,9 @@ fn with_runes() {
     .core(&core)
     .run_and_deserialize_output::<Output>();
 
+
+  print!("json_file {}", serde_json::to_string_pretty(&output).unwrap());
+
   assert_eq!(
     output,
     Output {

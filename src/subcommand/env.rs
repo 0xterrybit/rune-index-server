@@ -58,6 +58,9 @@ impl Env {
       .to_str()
       .with_context(|| format!("directory `{}` is not valid unicode", absolute.display()))?;
 
+
+    print!("relative:{}", relative);
+
     fs::create_dir_all(&absolute)?;
 
     let bitcoin_conf = absolute.join("bitcoin.conf");
@@ -108,7 +111,7 @@ rpcport={bitcoind_port}
       fs::write(absolute.join("batch.yaml"), yaml)?;
     }
 
-    let _bitcoind = KillOnDrop(
+    KillOnDrop(
       Command::new("bitcoind")
         .arg(format!("-conf={}", absolute.join("bitcoin.conf").display()))
         .stdout(Stdio::null())
@@ -157,11 +160,12 @@ rpcport={bitcoind_port}
       ord_server.arg("--content-proxy").arg(content_proxy);
     }
 
-    let _ord = KillOnDrop(ord_server.spawn()?);
+    KillOnDrop(ord_server.spawn()?);
 
     thread::sleep(Duration::from_millis(250));
 
     if !absolute.join("regtest/wallets/ord").try_exists()? {
+
       let status = Command::new(&ord)
         .arg("--datadir")
         .arg(&absolute)
@@ -185,10 +189,11 @@ rpcport={bitcoind_port}
 
       let receive = serde_json::from_slice::<wallet::receive::Output>(&output.stdout)?;
 
+
       let status = Command::new("bitcoin-cli")
         .arg(format!("-datadir={relative}"))
         .arg("generatetoaddress")
-        .arg("200")
+        .arg("13")
         .arg(
           receive
             .addresses
@@ -227,13 +232,13 @@ rpcport={bitcoind_port}
       format!("'{relative}'")
     };
 
-    eprintln!(
-      "{}
-{server_url}
-{}
-bitcoin-cli -datadir={datadir} getblockchaininfo
-{}
-{} --datadir {datadir} wallet balance",
+    eprintln!("
+        {}
+        {server_url}
+        {}
+        bitcoin-cli -datadir={datadir} getblockchaininfo
+        {}
+        {} --datadir {datadir} wallet balance",
       "`ord` server URL:".blue().bold(),
       "Example `bitcoin-cli` command:".blue().bold(),
       "Example `ord` command:".blue().bold(),
