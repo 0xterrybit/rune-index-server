@@ -1,0 +1,25 @@
+inscriptions:
+- delegate: null
+  destination: null
+  file: env/inscription.txt
+  metadata: null
+  metaprotocol: null
+  satpoint: null
+mode: separate-outputs
+parent: null
+postage: null
+reinscribe: false
+etching:
+  divisibility: 0
+  premine: '1000'
+  rune: FOO
+  supply: '2000'
+  symbol: '¢'
+  terms:
+    amount: '1000'
+    cap: 1
+    height: null
+    offset: null
+  turbo: false
+sat: null
+satpoint: null

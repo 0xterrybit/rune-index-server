@@ -2,7 +2,9 @@ use super::*;
 
 use redb::ReadTransaction;
 
-pub(crate) struct Rtx(pub(crate) ReadTransaction);
+pub(crate) struct Rtx(
+  pub(crate) ReadTransaction
+);
 
 impl Rtx {
 
@@ -14,7 +16,7 @@ impl Rtx {
         .range(0..)?
         .next_back()
         .transpose()?
-        .map(|(height, _header)| Height(height.value())),
+        .map(|(height, _header)| Height(height.value()))
     )
   }
 
@@ -27,7 +29,7 @@ impl Rtx {
         .next_back()
         .transpose()?
         .map(|(height, _header)| height.value() + 1)
-        .unwrap_or(0),
+        .unwrap_or(0)
     )
   }
 

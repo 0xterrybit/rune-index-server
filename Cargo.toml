@@ -86,9 +86,9 @@ mockcore = { path = "crates/mockcore" }
 name = "ord"
 path = "src/bin/main.rs"
 
-[lib]
-name = "ord"
-path = "src/lib.rs"
+# [lib]
+# name = "ord"
+# path = "src/lib.rs"
 
 [[test]]
 name = "integration"

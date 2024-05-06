@@ -1,4 +1,4 @@
-use {super::*, crate::wallet::batch, colored::Colorize, std::net::TcpListener};
+use {super::*, crate::wallet::batch, std::net::TcpListener};
 
 struct KillOnDrop(process::Child);
 
@@ -58,9 +58,6 @@ impl Env {
       .to_str()
       .with_context(|| format!("directory `{}` is not valid unicode", absolute.display()))?;
 
-
-    print!("relative:{}", relative);
-
     fs::create_dir_all(&absolute)?;
 
     let bitcoin_conf = absolute.join("bitcoin.conf");
@@ -69,7 +66,8 @@ impl Env {
       fs::write(
         bitcoin_conf,
         format!(
-          "datacarriersize=1000000
+          "
+datacarriersize=1000000
 regtest=1
 datadir={absolute_str}
 listen=0
@@ -111,7 +109,7 @@ rpcport={bitcoind_port}
       fs::write(absolute.join("batch.yaml"), yaml)?;
     }
 
-    KillOnDrop(
+    let _bitcoind = KillOnDrop(
       Command::new("bitcoind")
         .arg(format!("-conf={}", absolute.join("bitcoin.conf").display()))
         .stdout(Stdio::null())
@@ -128,6 +126,13 @@ rpcport={bitcoind_port}
     let rpc_url = format!("http://localhost:{bitcoind_port}");
 
     let server_url = format!("http://127.0.0.1:{ord_port}");
+
+    eprintln!(
+      "
+    server_url: {server_url}
+    rpc_url: {rpc_url}
+    "
+    );
 
     let config = absolute.join("ord.yaml");
 
@@ -160,12 +165,12 @@ rpcport={bitcoind_port}
       ord_server.arg("--content-proxy").arg(content_proxy);
     }
 
-    KillOnDrop(ord_server.spawn()?);
+    let _ord = KillOnDrop(ord_server.spawn()?);
 
     thread::sleep(Duration::from_millis(250));
 
+    // 如果不存在钱包，就创建
     if !absolute.join("regtest/wallets/ord").try_exists()? {
-
       let status = Command::new(&ord)
         .arg("--datadir")
         .arg(&absolute)
@@ -174,40 +179,50 @@ rpcport={bitcoind_port}
         .status()?;
 
       ensure!(status.success(), "failed to create wallet: {status}");
-
-      let output = Command::new(&ord)
-        .arg("--datadir")
-        .arg(&absolute)
-        .arg("wallet")
-        .arg("receive")
-        .output()?;
-
-      ensure!(
-        output.status.success(),
-        "failed to generate receive address: {status}"
-      );
-
-      let receive = serde_json::from_slice::<wallet::receive::Output>(&output.stdout)?;
-
-
-      let status = Command::new("bitcoin-cli")
-        .arg(format!("-datadir={relative}"))
-        .arg("generatetoaddress")
-        .arg("13")
-        .arg(
-          receive
-            .addresses
-            .first()
-            .cloned()
-            .unwrap()
-            .require_network(Network::Regtest)?
-            .to_string(),
-        )
-        .status()?;
-
-      ensure!(status.success(), "failed to create wallet: {status}");
     }
 
+    let output = Command::new(&ord)
+      .arg("--datadir")
+      .arg(&absolute)
+      .arg("wallet")
+      .arg("receive")
+      .output()?;
+
+    let receive = serde_json::from_slice::<wallet::receive::Output>(&output.stdout)?;
+
+    let addr = receive
+      .addresses
+      .first()
+      .cloned()
+      .unwrap()
+      .require_network(Network::Regtest)?
+      .to_string();
+
+    eprint!("
+    addr: {addr}
+    ");
+
+    let status = Command::new("bitcoin-cli")
+      .arg(format!("-datadir={relative}"))
+      .arg("generatetoaddress")
+      .arg("10")
+      .arg(
+        receive
+          .addresses
+          .first()
+          .cloned()
+          .unwrap()
+          .require_network(Network::Regtest)?
+          .to_string(),
+      )
+      .status()?;
+
+    // ensure!(status.success(), "failed to create wallet: {status}");
+    eprint!("
+        create wallet status: {}
+        ", status.success() );
+
+    // 打印 env.json 文件
     serde_json::to_writer_pretty(
       fs::File::create(self.directory.join("env.json"))?,
       &Info {
@@ -217,33 +232,32 @@ rpcport={bitcoind_port}
         ord_wallet_command: vec![
           ord.to_str().unwrap().into(),
           "--datadir".into(),
-          absolute.to_str().unwrap().into(),
+          absolute_str.into(),
           "wallet".into(),
         ],
       },
     )?;
 
-    let datadir = if relative
-      .chars()
-      .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-      relative
-    } else {
-      format!("'{relative}'")
-    };
+    // let datadir = if relative
+    //   .chars()
+    //   .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    // {
+    //   relative
+    // } else {
+    //   format!("'{relative}'")
+    // };
 
-    eprintln!("
-        {}
-        {server_url}
-        {}
-        bitcoin-cli -datadir={datadir} getblockchaininfo
-        {}
-        {} --datadir {datadir} wallet balance",
-      "`ord` server URL:".blue().bold(),
-      "Example `bitcoin-cli` command:".blue().bold(),
-      "Example `ord` command:".blue().bold(),
-      ord.display(),
-    );
+    // eprintln!(
+    // "
+    // {}
+    // {server_url}
+    // {}
+    // bitcoin-cli -datadir={datadir} getblockchaininfo {} {} --datadir {datadir} wallet balance",
+    // "`ord` server URL:".blue().bold(),
+    // "Example `bitcoin-cli` command:".blue().bold(),
+    // "Example `ord` command:".blue().bold(),
+    //  ord.display(),
+    //     );
 
     loop {
       if SHUTTING_DOWN.load(atomic::Ordering::Relaxed) {
