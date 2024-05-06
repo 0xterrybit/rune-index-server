@@ -24,9 +24,13 @@ use {
   indicatif::{ProgressBar, ProgressStyle},
   log::log_enabled,
   redb::{
-    Database, DatabaseError, MultimapTable, MultimapTableDefinition, MultimapTableHandle,
-    ReadOnlyTable, ReadableMultimapTable, ReadableTable, ReadableTableMetadata, RepairSession,
-    StorageError, Table, TableDefinition, TableHandle, TableStats, WriteTransaction,
+    Database, DatabaseError, 
+    ReadOnlyTable, ReadableMultimapTable, ReadableTable, ReadableTableMetadata, 
+    RepairSession,
+    StorageError, 
+    MultimapTable, MultimapTableDefinition, MultimapTableHandle,
+    Table, TableDefinition, TableHandle, 
+    TableStats, WriteTransaction
   },
   std::{
     collections::HashMap,
@@ -208,6 +212,7 @@ impl Index {
     settings: &Settings,
     event_sender: Option<tokio::sync::mpsc::Sender<Event>>,
   ) -> Result<Self> {
+    
     let client = settings.bitcoin_rpc_client(None)?;
 
     let path = settings.index().to_owned();
@@ -285,6 +290,7 @@ impl Index {
 
         database
       }
+      
       Err(DatabaseError::Storage(StorageError::Io(error)))
         if error.kind() == io::ErrorKind::NotFound =>
       {
@@ -348,7 +354,11 @@ impl Index {
             u64::from(settings.index_transactions()),
           )?;
 
-          Self::set_statistic(&mut statistics, Statistic::Schema, SCHEMA_VERSION)?;
+          Self::set_statistic(
+            &mut statistics, 
+            Statistic::Schema, 
+            SCHEMA_VERSION
+          )?;
         }
 
         if settings.index_runes() && settings.chain() == Chain::Mainnet {
@@ -399,6 +409,7 @@ impl Index {
 
         database
       }
+      
       Err(error) => bail!("failed to open index: {error}"),
     };
 
@@ -614,6 +625,7 @@ impl Index {
       let wtx = self.begin_write()?;
 
       let mut updater = Updater {
+
         height: wtx
           .open_table(HEIGHT_TO_BLOCK_HEADER)?
           .range(0..)?

@@ -41,6 +41,7 @@ pub(crate) struct Updater<'index> {
 }
 
 impl<'index> Updater<'index> {
+
   pub(crate) fn update_index(&mut self, mut wtx: WriteTransaction) -> Result {
     let start = Instant::now();
     let starting_height = u32::try_from(self.index.client.get_block_count()?).unwrap() + 1;
@@ -374,15 +375,12 @@ impl<'index> Updater<'index> {
     let mut height_to_block_header = wtx.open_table(HEIGHT_TO_BLOCK_HEADER)?;
     let mut height_to_last_sequence_number = wtx.open_table(HEIGHT_TO_LAST_SEQUENCE_NUMBER)?;
     let mut home_inscriptions = wtx.open_table(HOME_INSCRIPTIONS)?;
-    let mut inscription_id_to_sequence_number =
-      wtx.open_table(INSCRIPTION_ID_TO_SEQUENCE_NUMBER)?;
-    let mut inscription_number_to_sequence_number =
-      wtx.open_table(INSCRIPTION_NUMBER_TO_SEQUENCE_NUMBER)?;
+    let mut inscription_id_to_sequence_number = wtx.open_table(INSCRIPTION_ID_TO_SEQUENCE_NUMBER)?;
+    let mut inscription_number_to_sequence_number = wtx.open_table(INSCRIPTION_NUMBER_TO_SEQUENCE_NUMBER)?;
     let mut sat_to_sequence_number = wtx.open_multimap_table(SAT_TO_SEQUENCE_NUMBER)?;
     let mut satpoint_to_sequence_number = wtx.open_multimap_table(SATPOINT_TO_SEQUENCE_NUMBER)?;
     let mut sequence_number_to_children = wtx.open_multimap_table(SEQUENCE_NUMBER_TO_CHILDREN)?;
-    let mut sequence_number_to_inscription_entry =
-      wtx.open_table(SEQUENCE_NUMBER_TO_INSCRIPTION_ENTRY)?;
+    let mut sequence_number_to_inscription_entry = wtx.open_table(SEQUENCE_NUMBER_TO_INSCRIPTION_ENTRY)?;
     let mut sequence_number_to_satpoint = wtx.open_table(SEQUENCE_NUMBER_TO_SATPOINT)?;
     let mut statistic_to_count = wtx.open_table(STATISTIC_TO_COUNT)?;
     let mut transaction_id_to_transaction = wtx.open_table(TRANSACTION_ID_TO_TRANSACTION)?;
@@ -741,4 +739,5 @@ impl<'index> Updater<'index> {
 
     Ok(())
   }
+
 }
